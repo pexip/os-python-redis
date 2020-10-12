@@ -1,22 +1,9 @@
 from __future__ import unicode_literals
 from redis._compat import unicode
+from .conftest import wait_for_command
 
 
-def wait_for_command(client, monitor, command):
-    # issue a command with a key name that's local to this process.
-    # if we find a command with our key before the command we're waiting
-    # for, something went wrong
-    key = '__REDIS-PY-%s__' % str(client.client_id())
-    client.get(key)
-    while True:
-        monitor_response = monitor.next_command()
-        if command in monitor_response['command']:
-            return monitor_response
-        if key in monitor_response['command']:
-            return None
-
-
-class TestPipeline(object):
+class TestMonitor(object):
     def test_wait_command_not_found(self, r):
         "Make sure the wait_for_command func works when command is not found"
         with r.monitor() as m:

@@ -3,9 +3,15 @@ import pytest
 
 import redis
 from redis._compat import unichr, unicode
+from .conftest import wait_for_command
 
 
 class TestPipeline(object):
+    def test_pipeline_is_true(self, r):
+        "Ensure pipeline instances are not false-y"
+        with r.pipeline() as pipe:
+            assert pipe
+
     def test_pipeline(self, r):
         with r.pipeline() as pipe:
             (pipe.set('a', 'a1')
@@ -24,21 +30,28 @@ class TestPipeline(object):
                     [(b'z1', 2.0), (b'z2', 4)],
                 ]
 
+    def test_pipeline_memoryview(self, r):
+        with r.pipeline() as pipe:
+            (pipe.set('a', memoryview(b'a1'))
+                 .get('a'))
+            assert pipe.execute() == \
+                [
+                    True,
+                    b'a1',
+                ]
+
     def test_pipeline_length(self, r):
         with r.pipeline() as pipe:
             # Initially empty.
             assert len(pipe) == 0
-            assert not pipe
 
             # Fill 'er up!
             pipe.set('a', 'a1').set('b', 'b1').set('c', 'c1')
             assert len(pipe) == 3
-            assert pipe
 
             # Execute calls reset(), so empty once again.
             pipe.execute()
             assert len(pipe) == 0
-            assert not pipe
 
     def test_pipeline_no_transaction(self, r):
         with r.pipeline(transaction=False) as pipe:
@@ -160,6 +173,21 @@ class TestPipeline(object):
             assert pipe.set('z', 'zzz').execute() == [True]
             assert r['z'] == b'zzz'
 
+    def test_parse_error_raised_transaction(self, r):
+        with r.pipeline() as pipe:
+            pipe.multi()
+            # the zrem is invalid because we don't pass any keys to it
+            pipe.set('a', 1).zrem('b').set('b', 2)
+            with pytest.raises(redis.ResponseError) as ex:
+                pipe.execute()
+
+            assert unicode(ex.value).startswith('Command # 2 (ZREM b) of '
+                                                'pipeline caused error: ')
+
+            # make sure the pipe was restored to a working state
+            assert pipe.set('z', 'zzz').execute() == [True]
+            assert r['z'] == b'zzz'
+
     def test_watch_succeed(self, r):
         r['a'] = 1
         r['b'] = 2
@@ -191,6 +219,19 @@ class TestPipeline(object):
 
             assert not pipe.watching
 
+    def test_watch_failure_in_empty_transaction(self, r):
+        r['a'] = 1
+        r['b'] = 2
+
+        with r.pipeline() as pipe:
+            pipe.watch('a', 'b')
+            r['b'] = 3
+            pipe.multi()
+            with pytest.raises(redis.WatchError):
+                pipe.execute()
+
+            assert not pipe.watching
+
     def test_unwatch(self, r):
         r['a'] = 1
         r['b'] = 2
@@ -202,6 +243,40 @@ class TestPipeline(object):
             assert not pipe.watching
             pipe.get('a')
             assert pipe.execute() == [b'1']
+
+    def test_watch_exec_no_unwatch(self, r):
+        r['a'] = 1
+        r['b'] = 2
+
+        with r.monitor() as m:
+            with r.pipeline() as pipe:
+                pipe.watch('a', 'b')
+                assert pipe.watching
+                a_value = pipe.get('a')
+                b_value = pipe.get('b')
+                assert a_value == b'1'
+                assert b_value == b'2'
+                pipe.multi()
+                pipe.set('c', 3)
+                assert pipe.execute() == [True]
+                assert not pipe.watching
+
+            unwatch_command = wait_for_command(r, m, 'UNWATCH')
+            assert unwatch_command is None, "should not send UNWATCH"
+
+    def test_watch_reset_unwatch(self, r):
+        r['a'] = 1
+
+        with r.monitor() as m:
+            with r.pipeline() as pipe:
+                pipe.watch('a')
+                assert pipe.watching
+                pipe.reset()
+                assert not pipe.watching
+
+            unwatch_command = wait_for_command(r, m, 'UNWATCH')
+            assert unwatch_command is not None
+            assert unwatch_command['command'] == 'UNWATCH'
 
     def test_transaction_callable(self, r):
         r['a'] = 1
@@ -226,6 +301,14 @@ class TestPipeline(object):
         result = r.transaction(my_transaction, 'a', 'b')
         assert result == [True]
         assert r['c'] == b'4'
+
+    def test_transaction_callable_returns_value_from_callable(self, r):
+        def callback(pipe):
+            # No need to do anything here since we only want the return value
+            return 'a'
+
+        res = r.transaction(callback, 'my-key', value_from_callable=True)
+        assert res == 'a'
 
     def test_exec_error_in_no_transaction_pipeline(self, r):
         r['a'] = 1

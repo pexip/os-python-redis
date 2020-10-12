@@ -1,8 +1,16 @@
+import random
+
 import pytest
 import redis
 from mock import Mock
 
 from distutils.version import StrictVersion
+
+
+# redis 6 release candidates report a version number of 5.9.x. Use this
+# constant for skip_if decorators as a placeholder until 6.0.0 is officially
+# released
+REDIS_6_VERSION = '5.9.0'
 
 
 REDIS_INFO = {}
@@ -74,13 +82,15 @@ def _get_client(cls, request, single_connection_client=True, **kwargs):
 
 @pytest.fixture()
 def r(request):
-    return _get_client(redis.Redis, request)
+    with _get_client(redis.Redis, request) as client:
+        yield client
 
 
 @pytest.fixture()
 def r2(request):
     "A second client for tests that need multiple"
-    return _get_client(redis.Redis, request)
+    with _get_client(redis.Redis, request) as client:
+        yield client
 
 
 def _gen_cluster_mock_resp(r, response):
@@ -144,3 +154,22 @@ def mock_cluster_resp_slaves(request, **kwargs):
                 "slave 19efe5a631f3296fdf21a5441680f893e8cc96ec 0 "
                 "1447836789290 3 connected']")
     return _gen_cluster_mock_resp(r, response)
+
+
+def wait_for_command(client, monitor, command):
+    # issue a command with a key name that's local to this process.
+    # if we find a command with our key before the command we're waiting
+    # for, something went wrong
+    redis_version = REDIS_INFO["version"]
+    if StrictVersion(redis_version) >= StrictVersion('5.0.0'):
+        id_str = str(client.client_id())
+    else:
+        id_str = '%08x' % random.randrange(2**32)
+    key = '__REDIS-PY-%s__' % id_str
+    client.get(key)
+    while True:
+        monitor_response = monitor.next_command()
+        if command in monitor_response['command']:
+            return monitor_response
+        if key in monitor_response['command']:
+            return None

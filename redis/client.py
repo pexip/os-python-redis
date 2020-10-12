@@ -1,7 +1,6 @@
 from __future__ import unicode_literals
 from itertools import chain
 import datetime
-import sys
 import warnings
 import time
 import threading
@@ -158,6 +157,19 @@ def parse_info(response):
     return info
 
 
+def parse_memory_stats(response, **kwargs):
+    "Parse the results of MEMORY STATS"
+    stats = pairs_to_dict(response,
+                          decode_keys=True,
+                          decode_string_values=True)
+    for key, value in iteritems(stats):
+        if key.startswith('db.'):
+            stats[key] = pairs_to_dict(value,
+                                       decode_keys=True,
+                                       decode_string_values=True)
+    return stats
+
+
 SENTINEL_STATE_TYPES = {
     'can-failover-its-master': int,
     'config-epoch': int,
@@ -217,14 +229,24 @@ def parse_sentinel_get_master(response):
     return response and (response[0], int(response[1])) or None
 
 
-def pairs_to_dict(response, decode_keys=False):
+def nativestr_if_bytes(value):
+    return nativestr(value) if isinstance(value, bytes) else value
+
+
+def pairs_to_dict(response, decode_keys=False, decode_string_values=False):
     "Create a dict given a list of key/value pairs"
     if response is None:
         return {}
-    if decode_keys:
+    if decode_keys or decode_string_values:
         # the iter form is faster, but I don't know how to make that work
         # with a nativestr() map
-        return dict(izip(imap(nativestr, response[::2]), response[1::2]))
+        keys = response[::2]
+        if decode_keys:
+            keys = imap(nativestr, keys)
+        values = response[1::2]
+        if decode_string_values:
+            values = imap(nativestr_if_bytes, values)
+        return dict(izip(keys, values))
     else:
         it = iter(response)
         return dict(izip(it, it))
@@ -389,11 +411,12 @@ def parse_zscan(response, **options):
 
 
 def parse_slowlog_get(response, **options):
+    space = ' ' if options.get('decode_responses', False) else b' '
     return [{
         'id': item[0],
         'start_time': int(item[1]),
         'duration': int(item[2]),
-        'command': b' '.join(item[3])
+        'command': space.join(item[3])
     } for item in response]
 
 
@@ -469,6 +492,30 @@ def parse_client_kill(response, **options):
     return nativestr(response) == 'OK'
 
 
+def parse_acl_getuser(response, **options):
+    if response is None:
+        return None
+    data = pairs_to_dict(response, decode_keys=True)
+
+    # convert everything but user-defined data in 'keys' to native strings
+    data['flags'] = list(map(nativestr, data['flags']))
+    data['passwords'] = list(map(nativestr, data['passwords']))
+    data['commands'] = nativestr(data['commands'])
+
+    # split 'commands' into separate 'categories' and 'commands' lists
+    commands, categories = [], []
+    for command in data['commands'].split(' '):
+        if '@' in command:
+            categories.append(command)
+        else:
+            commands.append(command)
+
+    data['commands'] = commands
+    data['categories'] = categories
+    data['enabled'] = 'on' in data['flags']
+    return data
+
+
 class Redis(object):
     """
     Implementation of the Redis protocol.
@@ -525,6 +572,16 @@ class Redis(object):
         string_keys_to_dict('XREAD XREADGROUP', parse_xread),
         string_keys_to_dict('BGREWRITEAOF BGSAVE', lambda r: True),
         {
+            'ACL CAT': lambda r: list(map(nativestr, r)),
+            'ACL DELUSER': int,
+            'ACL GENPASS': nativestr,
+            'ACL GETUSER': parse_acl_getuser,
+            'ACL LIST': lambda r: list(map(nativestr, r)),
+            'ACL LOAD': bool_ok,
+            'ACL SAVE': bool_ok,
+            'ACL SETUSER': bool_ok,
+            'ACL USERS': lambda r: list(map(nativestr, r)),
+            'ACL WHOAMI': nativestr,
             'CLIENT GETNAME': lambda r: r and nativestr(r),
             'CLIENT ID': int,
             'CLIENT KILL': parse_client_kill,
@@ -563,6 +620,7 @@ class Redis(object):
             'INFO': parse_info,
             'LASTSAVE': timestamp_to_datetime,
             'MEMORY PURGE': bool_ok,
+            'MEMORY STATS': parse_memory_stats,
             'MEMORY USAGE': int_or_none,
             'OBJECT': parse_object,
             'PING': lambda r: nativestr(r) == 'PONG',
@@ -608,9 +666,9 @@ class Redis(object):
 
         For example::
 
-            redis://[:password]@localhost:6379/0
-            rediss://[:password]@localhost:6379/0
-            unix://[:password]@/path/to/socket.sock?db=0
+            redis://[[username]:[password]]@localhost:6379/0
+            rediss://[[username]:[password]]@localhost:6379/0
+            unix://[[username]:[password]]@/path/to/socket.sock?db=0
 
         Three URL schemes are supported:
 
@@ -648,8 +706,9 @@ class Redis(object):
                  decode_responses=False, retry_on_timeout=False,
                  ssl=False, ssl_keyfile=None, ssl_certfile=None,
                  ssl_cert_reqs='required', ssl_ca_certs=None,
+                 ssl_check_hostname=False,
                  max_connections=None, single_connection_client=False,
-                 health_check_interval=0):
+                 health_check_interval=0, client_name=None, username=None):
         if not connection_pool:
             if charset is not None:
                 warnings.warn(DeprecationWarning(
@@ -662,6 +721,7 @@ class Redis(object):
 
             kwargs = {
                 'db': db,
+                'username': username,
                 'password': password,
                 'socket_timeout': socket_timeout,
                 'encoding': encoding,
@@ -670,6 +730,7 @@ class Redis(object):
                 'retry_on_timeout': retry_on_timeout,
                 'max_connections': max_connections,
                 'health_check_interval': health_check_interval,
+                'client_name': client_name
             }
             # based on input, setup appropriate connection args
             if unix_socket_path is not None:
@@ -694,6 +755,7 @@ class Redis(object):
                         'ssl_certfile': ssl_certfile,
                         'ssl_cert_reqs': ssl_cert_reqs,
                         'ssl_ca_certs': ssl_ca_certs,
+                        'ssl_check_hostname': ssl_check_hostname,
                     })
             connection_pool = ConnectionPool(**kwargs)
         self.connection_pool = connection_pool
@@ -860,6 +922,212 @@ class Redis(object):
         return response
 
     # SERVER INFORMATION
+
+    # ACL methods
+    def acl_cat(self, category=None):
+        """
+        Returns a list of categories or commands within a category.
+
+        If ``category`` is not supplied, returns a list of all categories.
+        If ``category`` is supplied, returns a list of all commands within
+        that category.
+        """
+        pieces = [category] if category else []
+        return self.execute_command('ACL CAT', *pieces)
+
+    def acl_deluser(self, username):
+        "Delete the ACL for the specified ``username``"
+        return self.execute_command('ACL DELUSER', username)
+
+    def acl_genpass(self):
+        "Generate a random password value"
+        return self.execute_command('ACL GENPASS')
+
+    def acl_getuser(self, username):
+        """
+        Get the ACL details for the specified ``username``.
+
+        If ``username`` does not exist, return None
+        """
+        return self.execute_command('ACL GETUSER', username)
+
+    def acl_list(self):
+        "Return a list of all ACLs on the server"
+        return self.execute_command('ACL LIST')
+
+    def acl_load(self):
+        """
+        Load ACL rules from the configured ``aclfile``.
+
+        Note that the server must be configured with the ``aclfile``
+        directive to be able to load ACL rules from an aclfile.
+        """
+        return self.execute_command('ACL LOAD')
+
+    def acl_save(self):
+        """
+        Save ACL rules to the configured ``aclfile``.
+
+        Note that the server must be configured with the ``aclfile``
+        directive to be able to save ACL rules to an aclfile.
+        """
+        return self.execute_command('ACL SAVE')
+
+    def acl_setuser(self, username, enabled=False, nopass=False,
+                    passwords=None, hashed_passwords=None, categories=None,
+                    commands=None, keys=None, reset=False, reset_keys=False,
+                    reset_passwords=False):
+        """
+        Create or update an ACL user.
+
+        Create or update the ACL for ``username``. If the user already exists,
+        the existing ACL is completely overwritten and replaced with the
+        specified values.
+
+        ``enabled`` is a boolean indicating whether the user should be allowed
+        to authenticate or not. Defaults to ``False``.
+
+        ``nopass`` is a boolean indicating whether the can authenticate without
+        a password. This cannot be True if ``passwords`` are also specified.
+
+        ``passwords`` if specified is a list of plain text passwords
+        to add to or remove from the user. Each password must be prefixed with
+        a '+' to add or a '-' to remove. For convenience, the value of
+        ``add_passwords`` can be a simple prefixed string when adding or
+        removing a single password.
+
+        ``hashed_passwords`` if specified is a list of SHA-256 hashed passwords
+        to add to or remove from the user. Each hashed password must be
+        prefixed with a '+' to add or a '-' to remove. For convenience,
+        the value of ``hashed_passwords`` can be a simple prefixed string when
+        adding or removing a single password.
+
+        ``categories`` if specified is a list of strings representing category
+        permissions. Each string must be prefixed with either a '+' to add the
+        category permission or a '-' to remove the category permission.
+
+        ``commands`` if specified is a list of strings representing command
+        permissions. Each string must be prefixed with either a '+' to add the
+        command permission or a '-' to remove the command permission.
+
+        ``keys`` if specified is a list of key patterns to grant the user
+        access to. Keys patterns allow '*' to support wildcard matching. For
+        example, '*' grants access to all keys while 'cache:*' grants access
+        to all keys that are prefixed with 'cache:'. ``keys`` should not be
+        prefixed with a '~'.
+
+        ``reset`` is a boolean indicating whether the user should be fully
+        reset prior to applying the new ACL. Setting this to True will
+        remove all existing passwords, flags and privileges from the user and
+        then apply the specified rules. If this is False, the user's existing
+        passwords, flags and privileges will be kept and any new specified
+        rules will be applied on top.
+
+        ``reset_keys`` is a boolean indicating whether the user's key
+        permissions should be reset prior to applying any new key permissions
+        specified in ``keys``. If this is False, the user's existing
+        key permissions will be kept and any new specified key permissions
+        will be applied on top.
+
+        ``reset_passwords`` is a boolean indicating whether to remove all
+        existing passwords and the 'nopass' flag from the user prior to
+        applying any new passwords specified in 'passwords' or
+        'hashed_passwords'. If this is False, the user's existing passwords
+        and 'nopass' status will be kept and any new specified passwords
+        or hashed_passwords will be applied on top.
+        """
+        encoder = self.connection_pool.get_encoder()
+        pieces = [username]
+
+        if reset:
+            pieces.append(b'reset')
+
+        if reset_keys:
+            pieces.append(b'resetkeys')
+
+        if reset_passwords:
+            pieces.append(b'resetpass')
+
+        if enabled:
+            pieces.append(b'on')
+        else:
+            pieces.append(b'off')
+
+        if (passwords or hashed_passwords) and nopass:
+            raise DataError('Cannot set \'nopass\' and supply '
+                            '\'passwords\' or \'hashed_passwords\'')
+
+        if passwords:
+            # as most users will have only one password, allow remove_passwords
+            # to be specified as a simple string or a list
+            passwords = list_or_args(passwords, [])
+            for i, password in enumerate(passwords):
+                password = encoder.encode(password)
+                if password.startswith(b'+'):
+                    pieces.append(b'>%s' % password[1:])
+                elif password.startswith(b'-'):
+                    pieces.append(b'<%s' % password[1:])
+                else:
+                    raise DataError('Password %d must be prefixeed with a '
+                                    '"+" to add or a "-" to remove' % i)
+
+        if hashed_passwords:
+            # as most users will have only one password, allow remove_passwords
+            # to be specified as a simple string or a list
+            hashed_passwords = list_or_args(hashed_passwords, [])
+            for i, hashed_password in enumerate(hashed_passwords):
+                hashed_password = encoder.encode(hashed_password)
+                if hashed_password.startswith(b'+'):
+                    pieces.append(b'#%s' % hashed_password[1:])
+                elif hashed_password.startswith(b'-'):
+                    pieces.append(b'!%s' % hashed_password[1:])
+                else:
+                    raise DataError('Hashed %d password must be prefixeed '
+                                    'with a "+" to add or a "-" to remove' % i)
+
+        if nopass:
+            pieces.append(b'nopass')
+
+        if categories:
+            for category in categories:
+                category = encoder.encode(category)
+                # categories can be prefixed with one of (+@, +, -@, -)
+                if category.startswith(b'+@'):
+                    pieces.append(category)
+                elif category.startswith(b'+'):
+                    pieces.append(b'+@%s' % category[1:])
+                elif category.startswith(b'-@'):
+                    pieces.append(category)
+                elif category.startswith(b'-'):
+                    pieces.append(b'-@%s' % category[1:])
+                else:
+                    raise DataError('Category "%s" must be prefixed with '
+                                    '"+" or "-"'
+                                    % encoder.decode(category, force=True))
+        if commands:
+            for cmd in commands:
+                cmd = encoder.encode(cmd)
+                if not cmd.startswith(b'+') and not cmd.startswith(b'-'):
+                    raise DataError('Command "%s" must be prefixed with '
+                                    '"+" or "-"'
+                                    % encoder.decode(cmd, force=True))
+                pieces.append(cmd)
+
+        if keys:
+            for key in keys:
+                key = encoder.encode(key)
+                pieces.append(b'~%s' % key)
+
+        return self.execute_command('ACL SETUSER', *pieces)
+
+    def acl_users(self):
+        "Returns a list of all registered users on the server."
+        return self.execute_command('ACL USERS')
+
+    def acl_whoami(self):
+        "Get the username for the current connection"
+        return self.execute_command('ACL WHOAMI')
+
     def bgrewriteaof(self):
         "Tell the Redis server to rewrite the AOF file from data in memory."
         return self.execute_command('BGREWRITEAOF')
@@ -1083,6 +1351,10 @@ class Redis(object):
         "Return the encoding, idletime, or refcount about the key"
         return self.execute_command('OBJECT', infotype, key, infotype=infotype)
 
+    def memory_stats(self):
+        "Return a dictionary of memory stats"
+        return self.execute_command('MEMORY STATS')
+
     def memory_usage(self, key, samples=None):
         """
         Return the total memory usage for key, its value and associated
@@ -1189,7 +1461,9 @@ class Redis(object):
         args = ['SLOWLOG GET']
         if num is not None:
             args.append(num)
-        return self.execute_command(*args)
+        decode_responses = self.connection_pool.connection_kwargs.get(
+            'decode_responses', False)
+        return self.execute_command(*args, decode_responses=decode_responses)
 
     def slowlog_len(self):
         "Get the number of items in the slowlog"
@@ -1486,7 +1760,8 @@ class Redis(object):
             params.append('REPLACE')
         return self.execute_command('RESTORE', *params)
 
-    def set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    def set(self, name, value,
+            ex=None, px=None, nx=False, xx=False, keepttl=False):
         """
         Set the value at key ``name`` to ``value``
 
@@ -1499,6 +1774,9 @@ class Redis(object):
 
         ``xx`` if set to True, set the value at key ``name`` to ``value`` only
             if it already exists.
+
+        ``keepttl`` if True, retain the time to live associated with the key.
+            (Available since Redis 6.0)
         """
         pieces = [name, value]
         if ex is not None:
@@ -1516,6 +1794,10 @@ class Redis(object):
             pieces.append('NX')
         if xx:
             pieces.append('XX')
+
+        if keepttl:
+            pieces.append('KEEPTTL')
+
         return self.execute_command('SET', *pieces)
 
     def __setitem__(self, name, value):
@@ -1748,7 +2030,7 @@ class Redis(object):
             Use an "*" to indicate where in the key the item value is located
 
         ``get`` allows for returning items from external keys rather than the
-            sorted data itself.  Use an "*" to indicate where int he key
+            sorted data itself.  Use an "*" to indicate where in the key
             the item value is located
 
         ``desc`` allows for reversing the sort
@@ -1805,34 +2087,49 @@ class Redis(object):
         return self.execute_command('SORT', *pieces, **options)
 
     # SCAN COMMANDS
-    def scan(self, cursor=0, match=None, count=None):
+    def scan(self, cursor=0, match=None, count=None, _type=None):
         """
         Incrementally return lists of key names. Also return a cursor
         indicating the scan position.
 
         ``match`` allows for filtering the keys by pattern
 
-        ``count`` allows for hint the minimum number of returns
+        ``count`` provides a hint to Redis about the number of keys to
+            return per batch.
+
+        ``_type`` filters the returned values by a particular Redis type.
+            Stock Redis instances allow for the following types:
+            HASH, LIST, SET, STREAM, STRING, ZSET
+            Additionally, Redis modules can expose other types as well.
         """
         pieces = [cursor]
         if match is not None:
             pieces.extend([b'MATCH', match])
         if count is not None:
             pieces.extend([b'COUNT', count])
+        if _type is not None:
+            pieces.extend([b'TYPE', _type])
         return self.execute_command('SCAN', *pieces)
 
-    def scan_iter(self, match=None, count=None):
+    def scan_iter(self, match=None, count=None, _type=None):
         """
         Make an iterator using the SCAN command so that the client doesn't
         need to remember the cursor position.
 
         ``match`` allows for filtering the keys by pattern
 
-        ``count`` allows for hint the minimum number of returns
+        ``count`` provides a hint to Redis about the number of keys to
+            return per batch.
+
+        ``_type`` filters the returned values by a particular Redis type.
+            Stock Redis instances allow for the following types:
+            HASH, LIST, SET, STREAM, STRING, ZSET
+            Additionally, Redis modules can expose other types as well.
         """
         cursor = '0'
         while cursor != 0:
-            cursor, data = self.scan(cursor=cursor, match=match, count=count)
+            cursor, data = self.scan(cursor=cursor, match=match,
+                                     count=count, _type=_type)
             for item in data:
                 yield item
 
@@ -1997,7 +2294,7 @@ class Redis(object):
         If ``number`` is None, returns a random member of set ``name``.
 
         If ``number`` is supplied, returns a list of ``number`` random
-        memebers of set ``name``. Note this is only available when running
+        members of set ``name``. Note this is only available when running
         Redis 2.6+.
         """
         args = (number is not None) and [number] or []
@@ -2734,12 +3031,23 @@ class Redis(object):
         "Return the number of elements in hash ``name``"
         return self.execute_command('HLEN', name)
 
-    def hset(self, name, key, value):
+    def hset(self, name, key=None, value=None, mapping=None):
         """
-        Set ``key`` to ``value`` within hash ``name``
-        Returns 1 if HSET created a new field, otherwise 0
+        Set ``key`` to ``value`` within hash ``name``,
+        ``mapping`` accepts a dict of key/value pairs that that will be
+        added to hash ``name``.
+        Returns the number of fields that were added.
         """
-        return self.execute_command('HSET', name, key, value)
+        if key is None and not mapping:
+            raise DataError("'hset' with no key value pairs")
+        items = []
+        if key is not None:
+            items.extend((key, value))
+        if mapping:
+            for pair in mapping.items():
+                items.extend(pair)
+
+        return self.execute_command('HSET', name, *items)
 
     def hsetnx(self, name, key, value):
         """
@@ -2753,6 +3061,12 @@ class Redis(object):
         Set key to value within hash ``name`` for each corresponding
         key and value from the ``mapping`` dict.
         """
+        warnings.warn(
+            '%s.hmset() is deprecated. Use %s.hset() instead.'
+            % (self.__class__.__name__, self.__class__.__name__),
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not mapping:
             raise DataError("'hmset' with 'mapping' of length 0")
         items = []
@@ -3087,6 +3401,12 @@ class PubSub(object):
                 b'pong',
                 self.encoder.encode(self.HEALTH_CHECK_MESSAGE)
             ]
+        self.reset()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
         self.reset()
 
     def __del__(self):
@@ -3453,6 +3773,14 @@ class Pipeline(Redis):
     def __len__(self):
         return len(self.command_stack)
 
+    def __nonzero__(self):
+        "Pipeline instances should  always evaluate to True on Python 2.7"
+        return True
+
+    def __bool__(self):
+        "Pipeline instances should  always evaluate to True on Python 3+"
+        return True
+
     def reset(self):
         self.command_stack = []
         self.scripts = set()
@@ -3518,8 +3846,8 @@ class Pipeline(Redis):
             # indicates the user should retry this transaction.
             if self.watching:
                 self.reset()
-                raise WatchError("A ConnectionError occured on while watching "
-                                 "one or more keys")
+                raise WatchError("A ConnectionError occurred on while "
+                                 "watching one or more keys")
             # if retry_on_timeout is not set, or the error is not
             # a TimeoutError, raise it
             if not (conn.retry_on_timeout and isinstance(e, TimeoutError)):
@@ -3564,8 +3892,8 @@ class Pipeline(Redis):
         # the socket
         try:
             self.parse_response(connection, '_')
-        except ResponseError:
-            errors.append((0, sys.exc_info()[1]))
+        except ResponseError as e:
+            errors.append((0, e))
 
         # and all the other commands
         for i, command in enumerate(commands):
@@ -3574,20 +3902,20 @@ class Pipeline(Redis):
             else:
                 try:
                     self.parse_response(connection, '_')
-                except ResponseError:
-                    ex = sys.exc_info()[1]
-                    self.annotate_exception(ex, i + 1, command[0])
-                    errors.append((i, ex))
+                except ResponseError as e:
+                    self.annotate_exception(e, i + 1, command[0])
+                    errors.append((i, e))
 
         # parse the EXEC.
         try:
             response = self.parse_response(connection, '_')
         except ExecAbortError:
-            if self.explicit_transaction:
-                self.immediate_execute_command('DISCARD')
             if errors:
                 raise errors[0][1]
-            raise sys.exc_info()[1]
+            raise
+
+        # EXEC clears any watched keys
+        self.watching = False
 
         if response is None:
             raise WatchError("Watched variable changed.")
@@ -3626,8 +3954,8 @@ class Pipeline(Redis):
             try:
                 response.append(
                     self.parse_response(connection, args[0], **options))
-            except ResponseError:
-                response.append(sys.exc_info()[1])
+            except ResponseError as e:
+                response.append(e)
 
         if raise_on_error:
             self.raise_first_error(commands, response)
@@ -3670,7 +3998,7 @@ class Pipeline(Redis):
     def execute(self, raise_on_error=True):
         "Execute all the commands in the current pipeline"
         stack = self.command_stack
-        if not stack:
+        if not stack and not self.watching:
             return []
         if self.scripts:
             self.load_scripts()
@@ -3695,8 +4023,8 @@ class Pipeline(Redis):
             # since this connection has died. raise a WatchError, which
             # indicates the user should retry this transaction.
             if self.watching:
-                raise WatchError("A ConnectionError occured on while watching "
-                                 "one or more keys")
+                raise WatchError("A ConnectionError occurred on while "
+                                 "watching one or more keys")
             # if retry_on_timeout is not set, or the error is not
             # a TimeoutError, raise it
             if not (conn.retry_on_timeout and isinstance(e, TimeoutError)):

@@ -6,22 +6,24 @@ import errno
 import io
 import os
 import socket
-import sys
 import threading
 import warnings
 
-from redis._compat import (xrange, imap, byte_to_chr, unicode, long,
+from redis._compat import (xrange, imap, unicode, long,
                            nativestr, basestring, iteritems,
                            LifoQueue, Empty, Full, urlparse, parse_qs,
                            recv, recv_into, unquote, BlockingIOError,
                            sendall, shutdown, ssl_wrap_socket)
 from redis.exceptions import (
     AuthenticationError,
+    AuthenticationWrongNumberOfArgsError,
     BusyLoadingError,
+    ChildDeadlockedError,
     ConnectionError,
     DataError,
     ExecAbortError,
     InvalidResponse,
+    NoPermissionError,
     NoScriptError,
     ReadOnlyError,
     RedisError,
@@ -91,7 +93,7 @@ SENTINEL = object()
 
 
 class Encoder(object):
-    "Encode strings to bytes and decode bytes to strings"
+    "Encode strings to bytes-like and decode bytes-like to strings"
 
     def __init__(self, encoding, encoding_errors, decode_responses):
         self.encoding = encoding
@@ -99,13 +101,13 @@ class Encoder(object):
         self.decode_responses = decode_responses
 
     def encode(self, value):
-        "Return a bytestring representation of the value"
-        if isinstance(value, bytes):
+        "Return a bytestring or bytes-like representation of the value"
+        if isinstance(value, (bytes, memoryview)):
             return value
         elif isinstance(value, bool):
             # special case bool since it is a subclass of int
             raise DataError("Invalid input of type: 'bool'. Convert to a "
-                            "byte, string or number first.")
+                            "bytes, string, int or float first.")
         elif isinstance(value, float):
             value = repr(value).encode()
         elif isinstance(value, (int, long)):
@@ -115,15 +117,18 @@ class Encoder(object):
             # a value we don't know how to deal with. throw an error
             typename = type(value).__name__
             raise DataError("Invalid input of type: '%s'. Convert to a "
-                            "byte, string or number first." % typename)
+                            "bytes, string, int or float first." % typename)
         if isinstance(value, unicode):
             value = value.encode(self.encoding, self.encoding_errors)
         return value
 
     def decode(self, value, force=False):
-        "Return a unicode string from the byte representation"
-        if (self.decode_responses or force) and isinstance(value, bytes):
-            value = value.decode(self.encoding, self.encoding_errors)
+        "Return a unicode string from the bytes-like representation"
+        if self.decode_responses or force:
+            if isinstance(value, memoryview):
+                value = value.tobytes()
+            if isinstance(value, bytes):
+                value = value.decode(self.encoding, self.encoding_errors)
         return value
 
 
@@ -133,12 +138,21 @@ class BaseParser(object):
             'max number of clients reached': ConnectionError,
             'Client sent AUTH, but no password is set': AuthenticationError,
             'invalid password': AuthenticationError,
+            # some Redis server versions report invalid command syntax
+            # in lowercase
+            'wrong number of arguments for \'auth\' command':
+                AuthenticationWrongNumberOfArgsError,
+            # some Redis server versions report invalid command syntax
+            # in uppercase
+            'wrong number of arguments for \'AUTH\' command':
+                AuthenticationWrongNumberOfArgsError,
         },
         'EXECABORT': ExecAbortError,
         'LOADING': BusyLoadingError,
         'NOSCRIPT': NoScriptError,
         'READONLY': ReadOnlyError,
         'NOAUTH': AuthenticationError,
+        'NOPERM': NoPermissionError,
     }
 
     def parse_error(self, response):
@@ -307,18 +321,17 @@ class PythonParser(BaseParser):
         return self._buffer and self._buffer.can_read(timeout)
 
     def read_response(self):
-        response = self._buffer.readline()
-        if not response:
+        raw = self._buffer.readline()
+        if not raw:
             raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
 
-        byte, response = byte_to_chr(response[0]), response[1:]
+        byte, response = raw[:1], raw[1:]
 
-        if byte not in ('-', '+', ':', '$', '*'):
-            raise InvalidResponse("Protocol Error: %s, %s" %
-                                  (str(byte), str(response)))
+        if byte not in (b'-', b'+', b':', b'$', b'*'):
+            raise InvalidResponse("Protocol Error: %r" % raw)
 
         # server returned an error
-        if byte == '-':
+        if byte == b'-':
             response = nativestr(response)
             error = self.parse_error(response)
             # if the error is a ConnectionError, raise immediately so the user
@@ -331,19 +344,19 @@ class PythonParser(BaseParser):
             # necessary, so just return the exception instance here.
             return error
         # single value
-        elif byte == '+':
+        elif byte == b'+':
             pass
         # int value
-        elif byte == ':':
+        elif byte == b':':
             response = long(response)
         # bulk response
-        elif byte == '$':
+        elif byte == b'$':
             length = int(response)
             if length == -1:
                 return None
             response = self._buffer.read(length)
         # multi-bulk response
-        elif byte == '*':
+        elif byte == b'*':
             length = int(response)
             if length == -1:
                 return None
@@ -483,7 +496,6 @@ else:
 
 class Connection(object):
     "Manages TCP communication to and from a Redis server"
-    description_format = "Connection<host=%(host)s,port=%(port)s,db=%(db)s>"
 
     def __init__(self, host='localhost', port=6379, db=0, password=None,
                  socket_timeout=None, socket_connect_timeout=None,
@@ -491,11 +503,13 @@ class Connection(object):
                  socket_type=0, retry_on_timeout=False, encoding='utf-8',
                  encoding_errors='strict', decode_responses=False,
                  parser_class=DefaultParser, socket_read_size=65536,
-                 health_check_interval=0):
+                 health_check_interval=0, client_name=None, username=None):
         self.pid = os.getpid()
         self.host = host
         self.port = int(port)
         self.db = db
+        self.username = username
+        self.client_name = client_name
         self.password = password
         self.socket_timeout = socket_timeout
         self.socket_connect_timeout = socket_connect_timeout or socket_timeout
@@ -508,16 +522,22 @@ class Connection(object):
         self.encoder = Encoder(encoding, encoding_errors, decode_responses)
         self._sock = None
         self._parser = parser_class(socket_read_size=socket_read_size)
-        self._description_args = {
-            'host': self.host,
-            'port': self.port,
-            'db': self.db,
-        }
         self._connect_callbacks = []
         self._buffer_cutoff = 6000
 
     def __repr__(self):
-        return self.description_format % self._description_args
+        repr_args = ','.join(['%s=%s' % (k, v) for k, v in self.repr_pieces()])
+        return '%s<%s>' % (self.__class__.__name__, repr_args)
+
+    def repr_pieces(self):
+        pieces = [
+            ('host', self.host),
+            ('port', self.port),
+            ('db', self.db)
+        ]
+        if self.client_name:
+            pieces.append(('client_name', self.client_name))
+        return pieces
 
     def __del__(self):
         try:
@@ -539,8 +559,7 @@ class Connection(object):
             sock = self._connect()
         except socket.timeout:
             raise TimeoutError("Timeout connecting to server")
-        except socket.error:
-            e = sys.exc_info()[1]
+        except socket.error as e:
             raise ConnectionError(self._error_message(e))
 
         self._sock = sock
@@ -610,13 +629,34 @@ class Connection(object):
         "Initialize the connection, authenticate and select a database"
         self._parser.on_connect(self)
 
-        # if a password is specified, authenticate
-        if self.password:
+        # if username and/or password are set, authenticate
+        if self.username or self.password:
+            if self.username:
+                auth_args = (self.username, self.password or '')
+            else:
+                auth_args = (self.password,)
             # avoid checking health here -- PING will fail if we try
             # to check the health prior to the AUTH
-            self.send_command('AUTH', self.password, check_health=False)
+            self.send_command('AUTH', *auth_args, check_health=False)
+
+            try:
+                auth_response = self.read_response()
+            except AuthenticationWrongNumberOfArgsError:
+                # a username and password were specified but the Redis
+                # server seems to be < 6.0.0 which expects a single password
+                # arg. retry auth with just the password.
+                # https://github.com/andymccurdy/redis-py/issues/1274
+                self.send_command('AUTH', self.password, check_health=False)
+                auth_response = self.read_response()
+
+            if nativestr(auth_response) != 'OK':
+                raise AuthenticationError('Invalid Username or Password')
+
+        # if a client_name is given, set it
+        if self.client_name:
+            self.send_command('CLIENT', 'SETNAME', self.client_name)
             if nativestr(self.read_response()) != 'OK':
-                raise AuthenticationError('Invalid Password')
+                raise ConnectionError('Error setting client name')
 
         # if a database is specified, switch to it
         if self.db:
@@ -645,7 +685,7 @@ class Connection(object):
                 if nativestr(self.read_response()) != 'PONG':
                     raise ConnectionError(
                         'Bad response from PING health check')
-            except (ConnectionError, TimeoutError) as ex:
+            except (ConnectionError, TimeoutError):
                 self.disconnect()
                 self.send_command('PING', check_health=False)
                 if nativestr(self.read_response()) != 'PONG':
@@ -656,7 +696,7 @@ class Connection(object):
         "Send an already packed command to the Redis server"
         if not self._sock:
             self.connect()
-        # guard against health check recurrsion
+        # guard against health check recursion
         if check_health:
             self.check_health()
         try:
@@ -667,8 +707,7 @@ class Connection(object):
         except socket.timeout:
             self.disconnect()
             raise TimeoutError("Timeout writing to socket")
-        except socket.error:
-            e = sys.exc_info()[1]
+        except socket.error as e:
             self.disconnect()
             if len(e.args) == 1:
                 errno, errmsg = 'UNKNOWN', e.args[0]
@@ -677,7 +716,7 @@ class Connection(object):
                 errmsg = e.args[1]
             raise ConnectionError("Error %s while writing to socket. %s." %
                                   (errno, errmsg))
-        except:  # noqa: E722
+        except BaseException:
             self.disconnect()
             raise
 
@@ -702,12 +741,11 @@ class Connection(object):
             self.disconnect()
             raise TimeoutError("Timeout reading from %s:%s" %
                                (self.host, self.port))
-        except socket.error:
+        except socket.error as e:
             self.disconnect()
-            e = sys.exc_info()[1]
             raise ConnectionError("Error while reading from %s:%s : %s" %
                                   (self.host, self.port, e.args))
-        except:  # noqa: E722
+        except BaseException:
             self.disconnect()
             raise
 
@@ -736,16 +774,18 @@ class Connection(object):
         buffer_cutoff = self._buffer_cutoff
         for arg in imap(self.encoder.encode, args):
             # to avoid large string mallocs, chunk the command into the
-            # output list if we're sending large values
-            if len(buff) > buffer_cutoff or len(arg) > buffer_cutoff:
+            # output list if we're sending large values or memoryviews
+            arg_length = len(arg)
+            if (len(buff) > buffer_cutoff or arg_length > buffer_cutoff
+                    or isinstance(arg, memoryview)):
                 buff = SYM_EMPTY.join(
-                    (buff, SYM_DOLLAR, str(len(arg)).encode(), SYM_CRLF))
+                    (buff, SYM_DOLLAR, str(arg_length).encode(), SYM_CRLF))
                 output.append(buff)
                 output.append(arg)
                 buff = SYM_CRLF
             else:
                 buff = SYM_EMPTY.join(
-                    (buff, SYM_DOLLAR, str(len(arg)).encode(),
+                    (buff, SYM_DOLLAR, str(arg_length).encode(),
                      SYM_CRLF, arg, SYM_CRLF))
         output.append(buff)
         return output
@@ -760,12 +800,13 @@ class Connection(object):
         for cmd in commands:
             for chunk in self.pack_command(*cmd):
                 chunklen = len(chunk)
-                if buffer_length > buffer_cutoff or chunklen > buffer_cutoff:
+                if (buffer_length > buffer_cutoff or chunklen > buffer_cutoff
+                        or isinstance(chunk, memoryview)):
                     output.append(SYM_EMPTY.join(pieces))
                     buffer_length = 0
                     pieces = []
 
-                if chunklen > self._buffer_cutoff:
+                if chunklen > buffer_cutoff or isinstance(chunk, memoryview):
                     output.append(chunk)
                 else:
                     pieces.append(chunk)
@@ -777,10 +818,10 @@ class Connection(object):
 
 
 class SSLConnection(Connection):
-    description_format = "SSLConnection<host=%(host)s,port=%(port)s,db=%(db)s>"
 
     def __init__(self, ssl_keyfile=None, ssl_certfile=None,
-                 ssl_cert_reqs='required', ssl_ca_certs=None, **kwargs):
+                 ssl_cert_reqs='required', ssl_ca_certs=None,
+                 ssl_check_hostname=False, **kwargs):
         if not ssl_available:
             raise RedisError("Python wasn't built with SSL support")
 
@@ -803,13 +844,14 @@ class SSLConnection(Connection):
             ssl_cert_reqs = CERT_REQS[ssl_cert_reqs]
         self.cert_reqs = ssl_cert_reqs
         self.ca_certs = ssl_ca_certs
+        self.check_hostname = ssl_check_hostname
 
     def _connect(self):
         "Wrap the socket with SSL support"
         sock = super(SSLConnection, self)._connect()
         if hasattr(ssl, "create_default_context"):
             context = ssl.create_default_context()
-            context.check_hostname = False
+            context.check_hostname = self.check_hostname
             context.verify_mode = self.cert_reqs
             if self.certfile and self.keyfile:
                 context.load_cert_chain(certfile=self.certfile,
@@ -830,17 +872,18 @@ class SSLConnection(Connection):
 
 
 class UnixDomainSocketConnection(Connection):
-    description_format = "UnixDomainSocketConnection<path=%(path)s,db=%(db)s>"
 
-    def __init__(self, path='', db=0, password=None,
+    def __init__(self, path='', db=0, username=None, password=None,
                  socket_timeout=None, encoding='utf-8',
                  encoding_errors='strict', decode_responses=False,
                  retry_on_timeout=False,
                  parser_class=DefaultParser, socket_read_size=65536,
-                 health_check_interval=0):
+                 health_check_interval=0, client_name=None):
         self.pid = os.getpid()
         self.path = path
         self.db = db
+        self.username = username
+        self.client_name = client_name
         self.password = password
         self.socket_timeout = socket_timeout
         self.retry_on_timeout = retry_on_timeout
@@ -849,12 +892,17 @@ class UnixDomainSocketConnection(Connection):
         self.encoder = Encoder(encoding, encoding_errors, decode_responses)
         self._sock = None
         self._parser = parser_class(socket_read_size=socket_read_size)
-        self._description_args = {
-            'path': self.path,
-            'db': self.db,
-        }
         self._connect_callbacks = []
         self._buffer_cutoff = 6000
+
+    def repr_pieces(self):
+        pieces = [
+            ('path', self.path),
+            ('db', self.db),
+        ]
+        if self.client_name:
+            pieces.append(('client_name', self.client_name))
+        return pieces
 
     def _connect(self):
         "Create a Unix domain socket connection"
@@ -892,6 +940,7 @@ URL_QUERY_ARGUMENT_PARSERS = {
     'retry_on_timeout': to_bool,
     'max_connections': int,
     'health_check_interval': int,
+    'ssl_check_hostname': to_bool,
 }
 
 
@@ -904,9 +953,9 @@ class ConnectionPool(object):
 
         For example::
 
-            redis://[:password]@localhost:6379/0
-            rediss://[:password]@localhost:6379/0
-            unix://[:password]@/path/to/socket.sock?db=0
+            redis://[[username]:[password]]@localhost:6379/0
+            rediss://[[username]:[password]]@localhost:6379/0
+            unix://[[username]:[password]]@/path/to/socket.sock?db=0
 
         Three URL schemes are supported:
 
@@ -931,7 +980,7 @@ class ConnectionPool(object):
         percent-encoded URLs. If this argument is set to ``True`` all ``%xx``
         escapes will be replaced by their single-character equivalents after
         the URL has been parsed. This only applies to the ``hostname``,
-        ``path``, and ``password`` components.
+        ``path``, ``username`` and ``password`` components.
 
         Any additional querystring arguments and keyword arguments will be
         passed along to the ConnectionPool class's initializer. The querystring
@@ -960,17 +1009,20 @@ class ConnectionPool(object):
                     url_options[name] = value[0]
 
         if decode_components:
+            username = unquote(url.username) if url.username else None
             password = unquote(url.password) if url.password else None
             path = unquote(url.path) if url.path else None
             hostname = unquote(url.hostname) if url.hostname else None
         else:
-            password = url.password
+            username = url.username or None
+            password = url.password or None
             path = url.path
             hostname = url.hostname
 
         # We only support redis://, rediss:// and unix:// schemes.
         if url.scheme == 'unix':
             url_options.update({
+                'username': username,
                 'password': password,
                 'path': path,
                 'connection_class': UnixDomainSocketConnection,
@@ -980,6 +1032,7 @@ class ConnectionPool(object):
             url_options.update({
                 'host': hostname,
                 'port': int(url.port or 6379),
+                'username': username,
                 'password': password,
             })
 
@@ -995,7 +1048,7 @@ class ConnectionPool(object):
                 url_options['connection_class'] = SSLConnection
         else:
             valid_schemes = ', '.join(('redis://', 'rediss://', 'unix://'))
-            raise ValueError('Redis URL must specify one of the following'
+            raise ValueError('Redis URL must specify one of the following '
                              'schemes (%s)' % valid_schemes)
 
         # last shot at the db value
@@ -1036,6 +1089,15 @@ class ConnectionPool(object):
         self.connection_kwargs = connection_kwargs
         self.max_connections = max_connections
 
+        # a lock to protect the critical section in _checkpid().
+        # this lock is acquired when the process id changes, such as
+        # after a fork. during this time, multiple threads in the child
+        # process could attempt to acquire this lock. the first thread
+        # to acquire the lock will reset the data structures and lock
+        # object of this pool. subsequent threads acquiring this lock
+        # will notice the first thread already did the work and simply
+        # release the lock.
+        self._fork_lock = threading.Lock()
         self.reset()
 
     def __repr__(self):
@@ -1045,29 +1107,86 @@ class ConnectionPool(object):
         )
 
     def reset(self):
-        self.pid = os.getpid()
+        self._lock = threading.Lock()
         self._created_connections = 0
         self._available_connections = []
         self._in_use_connections = set()
-        self._check_lock = threading.Lock()
+
+        # this must be the last operation in this method. while reset() is
+        # called when holding _fork_lock, other threads in this process
+        # can call _checkpid() which compares self.pid and os.getpid() without
+        # holding any lock (for performance reasons). keeping this assignment
+        # as the last operation ensures that those other threads will also
+        # notice a pid difference and block waiting for the first thread to
+        # release _fork_lock. when each of these threads eventually acquire
+        # _fork_lock, they will notice that another thread already called
+        # reset() and they will immediately release _fork_lock and continue on.
+        self.pid = os.getpid()
 
     def _checkpid(self):
+        # _checkpid() attempts to keep ConnectionPool fork-safe on modern
+        # systems. this is called by all ConnectionPool methods that
+        # manipulate the pool's state such as get_connection() and release().
+        #
+        # _checkpid() determines whether the process has forked by comparing
+        # the current process id to the process id saved on the ConnectionPool
+        # instance. if these values are the same, _checkpid() simply returns.
+        #
+        # when the process ids differ, _checkpid() assumes that the process
+        # has forked and that we're now running in the child process. the child
+        # process cannot use the parent's file descriptors (e.g., sockets).
+        # therefore, when _checkpid() sees the process id change, it calls
+        # reset() in order to reinitialize the child's ConnectionPool. this
+        # will cause the child to make all new connection objects.
+        #
+        # _checkpid() is protected by self._fork_lock to ensure that multiple
+        # threads in the child process do not call reset() multiple times.
+        #
+        # there is an extremely small chance this could fail in the following
+        # scenario:
+        #   1. process A calls _checkpid() for the first time and acquires
+        #      self._fork_lock.
+        #   2. while holding self._fork_lock, process A forks (the fork()
+        #      could happen in a different thread owned by process A)
+        #   3. process B (the forked child process) inherits the
+        #      ConnectionPool's state from the parent. that state includes
+        #      a locked _fork_lock. process B will not be notified when
+        #      process A releases the _fork_lock and will thus never be
+        #      able to acquire the _fork_lock.
+        #
+        # to mitigate this possible deadlock, _checkpid() will only wait 5
+        # seconds to acquire _fork_lock. if _fork_lock cannot be acquired in
+        # that time it is assumed that the child is deadlocked and a
+        # redis.ChildDeadlockedError error is raised.
         if self.pid != os.getpid():
-            with self._check_lock:
-                if self.pid == os.getpid():
-                    # another thread already did the work while we waited
-                    # on the lock.
-                    return
-                self.reset()
+            # python 2.7 doesn't support a timeout option to lock.acquire()
+            # we have to mimic lock timeouts ourselves.
+            timeout_at = time() + 5
+            acquired = False
+            while time() < timeout_at:
+                acquired = self._fork_lock.acquire(False)
+                if acquired:
+                    break
+            if not acquired:
+                raise ChildDeadlockedError
+            # reset() the instance for the new process if another thread
+            # hasn't already done so
+            try:
+                if self.pid != os.getpid():
+                    self.reset()
+            finally:
+                self._fork_lock.release()
 
     def get_connection(self, command_name, *keys, **options):
         "Get a connection from the pool"
         self._checkpid()
-        try:
-            connection = self._available_connections.pop()
-        except IndexError:
-            connection = self.make_connection()
-        self._in_use_connections.add(connection)
+        with self._lock:
+            try:
+                connection = self._available_connections.pop()
+            except IndexError:
+                connection = self.make_connection()
+            self._in_use_connections.add(connection)
+
         try:
             # ensure this connection is connected to Redis
             connection.connect()
@@ -1083,8 +1202,9 @@ class ConnectionPool(object):
                 connection.connect()
                 if connection.can_read():
                     raise ConnectionError('Connection not ready')
-        except:  # noqa: E722
-            # release the connection back to the pool so that we don't leak it
+        except BaseException:
+            # release the connection back to the pool so that we don't
+            # leak it
             self.release(connection)
             raise
 
@@ -1109,18 +1229,45 @@ class ConnectionPool(object):
     def release(self, connection):
         "Releases the connection back to the pool"
         self._checkpid()
-        if connection.pid != self.pid:
-            return
-        self._in_use_connections.remove(connection)
-        self._available_connections.append(connection)
+        with self._lock:
+            try:
+                self._in_use_connections.remove(connection)
+            except KeyError:
+                # Gracefully fail when a connection is returned to this pool
+                # that the pool doesn't actually own
+                pass
 
-    def disconnect(self):
-        "Disconnects all connections in the pool"
+            if self.owns_connection(connection):
+                self._available_connections.append(connection)
+            else:
+                # pool doesn't own this connection. do not add it back
+                # to the pool and decrement the count so that another
+                # connection can take its place if needed
+                self._created_connections -= 1
+                connection.disconnect()
+                return
+
+    def owns_connection(self, connection):
+        return connection.pid == self.pid
+
+    def disconnect(self, inuse_connections=True):
+        """
+        Disconnects connections in the pool
+
+        If ``inuse_connections`` is True, disconnect connections that are
+        current in use, potentially by other threads. Otherwise only disconnect
+        connections that are idle in the pool.
+        """
         self._checkpid()
-        all_conns = chain(self._available_connections,
-                          self._in_use_connections)
-        for connection in all_conns:
-            connection.disconnect()
+        with self._lock:
+            if inuse_connections:
+                connections = chain(self._available_connections,
+                                    self._in_use_connections)
+            else:
+                connections = self._available_connections
+
+            for connection in connections:
+                connection.disconnect()
 
 
 class BlockingConnectionPool(ConnectionPool):
@@ -1168,9 +1315,6 @@ class BlockingConnectionPool(ConnectionPool):
             **connection_kwargs)
 
     def reset(self):
-        self.pid = os.getpid()
-        self._check_lock = threading.Lock()
-
         # Create and fill up a thread safe queue with ``None`` values.
         self.pool = self.queue_class(self.max_connections)
         while True:
@@ -1182,6 +1326,17 @@ class BlockingConnectionPool(ConnectionPool):
         # Keep a list of actual connection instances so that we can
         # disconnect them later.
         self._connections = []
+
+        # this must be the last operation in this method. while reset() is
+        # called when holding _fork_lock, other threads in this process
+        # can call _checkpid() which compares self.pid and os.getpid() without
+        # holding any lock (for performance reasons). keeping this assignment
+        # as the last operation ensures that those other threads will also
+        # notice a pid difference and block waiting for the first thread to
+        # release _fork_lock. when each of these threads eventually acquire
+        # _fork_lock, they will notice that another thread already called
+        # reset() and they will immediately release _fork_lock and continue on.
+        self.pid = os.getpid()
 
     def make_connection(self):
         "Make a fresh connection."
@@ -1234,7 +1389,7 @@ class BlockingConnectionPool(ConnectionPool):
                 connection.connect()
                 if connection.can_read():
                     raise ConnectionError('Connection not ready')
-        except:  # noqa: E722
+        except BaseException:
             # release the connection back to the pool so that we don't leak it
             self.release(connection)
             raise
@@ -1245,7 +1400,13 @@ class BlockingConnectionPool(ConnectionPool):
         "Releases the connection back to the pool."
         # Make sure we haven't changed process.
         self._checkpid()
-        if connection.pid != self.pid:
+        if not self.owns_connection(connection):
+            # pool doesn't own this connection. do not add it back
+            # to the pool. instead add a None value which is a placeholder
+            # that will cause the pool to recreate the connection if
+            # its needed.
+            connection.disconnect()
+            self.pool.put_nowait(None)
             return
 
         # Put the connection back into the pool.
