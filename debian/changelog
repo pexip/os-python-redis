@@ -1,3 +1,9 @@
+python-redis (3.5.3-0pexip1) pexip; urgency=medium
+
+  * Import latest version from upstream
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Mon, 12 Oct 2020 02:58:51 +0100
+
 python-redis (3.3.11-3) unstable; urgency=medium
 
   * Drop python2 support; Closes: #938125
