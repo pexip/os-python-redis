@@ -5,12 +5,22 @@ The Python interface to the Redis key-value store.
 
 .. image:: https://secure.travis-ci.org/andymccurdy/redis-py.svg?branch=master
         :target: https://travis-ci.org/andymccurdy/redis-py
-.. image:: https://readthedocs.org/projects/redis-py/badge/?version=latest&style=flat
-        :target: https://redis-py.readthedocs.io/en/latest/
+.. image:: https://readthedocs.org/projects/redis-py/badge/?version=stable&style=flat
+        :target: https://redis-py.readthedocs.io/en/stable/
 .. image:: https://badge.fury.io/py/redis.svg
         :target: https://pypi.org/project/redis/
 .. image:: https://codecov.io/gh/andymccurdy/redis-py/branch/master/graph/badge.svg
   :target: https://codecov.io/gh/andymccurdy/redis-py
+
+
+Python 2 Compatibility Note
+---------------------------
+
+redis-py 3.5.x will be the last version of redis-py that supports Python 2.
+The 3.5.x line will continue to get bug fixes and security patches that
+support Python 2 until August 1, 2020. redis-py 4.0 will be the next major
+version and will require Python 3.5+.
+
 
 Installation
 ------------
@@ -48,7 +58,7 @@ Getting Started
     >>> r.set('foo', 'bar')
     True
     >>> r.get('foo')
-    'bar'
+    b'bar'
 
 By default, all responses are returned as `bytes` in Python 3 and `str` in
 Python 2. The user is responsible for decoding to Python 3 strings or Python 2
@@ -71,8 +81,7 @@ provide an upgrade path for users migrating from 2.X to 3.0.
 Python Version Support
 ^^^^^^^^^^^^^^^^^^^^^^
 
-redis-py 3.0 now supports Python 2.7 and Python 3.4+. Python 2.6 and 3.3
-support has been dropped.
+redis-py 3.0 supports Python 2.7 and Python 3.5+.
 
 
 Client Classes: Redis and StrictRedis
@@ -88,7 +97,7 @@ make things easier going forward, it was decided to drop support for these
 alternate implementations and instead focus on a single client class.
 
 2.X users that are already using StrictRedis don't have to change the class
-name. StrictRedis will continue to work for the forseeable future.
+name. StrictRedis will continue to work for the foreseeable future.
 
 2.X users that are using the Redis class will have to make changes if they
 use any of the following commands:
@@ -135,7 +144,7 @@ dict is a mapping of element-names -> score.
 
 MSET, MSETNX and ZADD now look like:
 
-.. code-block:: pycon
+.. code-block:: python
 
     def mset(self, mapping):
     def msetnx(self, mapping):
@@ -151,7 +160,7 @@ ZINCRBY
 redis-py 2.X accidentally modified the argument order of ZINCRBY, swapping the
 order of value and amount. ZINCRBY now looks like:
 
-.. code-block:: pycon
+.. code-block:: python
 
     def zincrby(self, name, amount, value):
 
@@ -198,7 +207,7 @@ raised where none was before, this might alarm some users.
 2.X users should make sure they're wrapping their lock code in a try/catch
 like this:
 
-.. code-block:: pycon
+.. code-block:: python
 
     try:
         with r.lock('my-lock-key', blocking_timeout=5) as lock:
@@ -248,7 +257,7 @@ a Redis server. By default, each Redis instance you create will in turn create
 its own connection pool. You can override this behavior and use an existing
 connection pool by passing an already created connection pool instance to the
 connection_pool argument of the Redis class. You may choose to do this in order
-to implement client side sharding or have finer grain control of how
+to implement client side sharding or have fine-grain control of how
 connections are managed.
 
 .. code-block:: pycon
@@ -407,7 +416,7 @@ Pipelines are quite simple to use:
     >>> # the EXECUTE call sends all buffered commands to the server, returning
     >>> # a list of responses, one for each command.
     >>> pipe.execute()
-    [True, 'baz']
+    [True, b'baz']
 
 For ease of use, all commands being buffered into the pipeline return the
 pipeline object itself. Therefore calls can be chained like:
@@ -506,6 +515,9 @@ which is much easier to read:
     >>> r.transaction(client_side_incr, 'OUR-SEQUENCE-KEY')
     [True]
 
+Be sure to call `pipe.multi()` in the callable passed to `Redis.transaction`
+prior to any write commands.
+
 Publish / Subscribe
 ^^^^^^^^^^^^^^^^^^^
 
@@ -532,11 +544,11 @@ instance.
 .. code-block:: pycon
 
     >>> p.get_message()
-    {'pattern': None, 'type': 'subscribe', 'channel': 'my-second-channel', 'data': 1L}
+    {'pattern': None, 'type': 'subscribe', 'channel': b'my-second-channel', 'data': 1}
     >>> p.get_message()
-    {'pattern': None, 'type': 'subscribe', 'channel': 'my-first-channel', 'data': 2L}
+    {'pattern': None, 'type': 'subscribe', 'channel': b'my-first-channel', 'data': 2}
     >>> p.get_message()
-    {'pattern': None, 'type': 'psubscribe', 'channel': 'my-*', 'data': 3L}
+    {'pattern': None, 'type': 'psubscribe', 'channel': b'my-*', 'data': 3}
 
 Every message read from a `PubSub` instance will be a dictionary with the
 following keys.
@@ -563,9 +575,9 @@ Let's send a message now.
     >>> r.publish('my-first-channel', 'some data')
     2
     >>> p.get_message()
-    {'channel': 'my-first-channel', 'data': 'some data', 'pattern': None, 'type': 'message'}
+    {'channel': b'my-first-channel', 'data': b'some data', 'pattern': None, 'type': 'message'}
     >>> p.get_message()
-    {'channel': 'my-first-channel', 'data': 'some data', 'pattern': 'my-*', 'type': 'pmessage'}
+    {'channel': b'my-first-channel', 'data': b'some data', 'pattern': b'my-*', 'type': 'pmessage'}
 
 Unsubscribing works just like subscribing. If no arguments are passed to
 [p]unsubscribe, all channels or patterns will be unsubscribed from.
@@ -575,11 +587,11 @@ Unsubscribing works just like subscribing. If no arguments are passed to
     >>> p.unsubscribe()
     >>> p.punsubscribe('my-*')
     >>> p.get_message()
-    {'channel': 'my-second-channel', 'data': 2L, 'pattern': None, 'type': 'unsubscribe'}
+    {'channel': b'my-second-channel', 'data': 2, 'pattern': None, 'type': 'unsubscribe'}
     >>> p.get_message()
-    {'channel': 'my-first-channel', 'data': 1L, 'pattern': None, 'type': 'unsubscribe'}
+    {'channel': b'my-first-channel', 'data': 1, 'pattern': None, 'type': 'unsubscribe'}
     >>> p.get_message()
-    {'channel': 'my-*', 'data': 0L, 'pattern': None, 'type': 'punsubscribe'}
+    {'channel': b'my-*', 'data': 0, 'pattern': None, 'type': 'punsubscribe'}
 
 redis-py also allows you to register callback functions to handle published
 messages. Message handlers take a single argument, the message, which is a
@@ -595,11 +607,11 @@ handled.
 .. code-block:: pycon
 
     >>> def my_handler(message):
-    ...     print 'MY HANDLER: ', message['data']
+    ...     print('MY HANDLER: ', message['data'])
     >>> p.subscribe(**{'my-channel': my_handler})
     # read the subscribe confirmation message
     >>> p.get_message()
-    {'pattern': None, 'type': 'subscribe', 'channel': 'my-channel', 'data': 1L}
+    {'pattern': None, 'type': 'subscribe', 'channel': b'my-channel', 'data': 1}
     >>> r.publish('my-channel', 'awesome data')
     1
     # for the message handler to work, we need tell the instance to read data.
@@ -609,7 +621,7 @@ handled.
     MY HANDLER:  awesome data
     # note here that the my_handler callback printed the string above.
     # `message` is None because the message was handled by our handler.
-    >>> print message
+    >>> print(message)
     None
 
 If your application is not interested in the (sometimes noisy)
@@ -626,7 +638,7 @@ application.
     >>> r.publish('my-channel', 'my data')
     1
     >>> p.get_message()
-    {'channel': 'my-channel', 'data': 'my data', 'pattern': None, 'type': 'message'}
+    {'channel': b'my-channel', 'data': b'my data', 'pattern': None, 'type': 'message'}
 
 There are three different strategies for reading messages.
 
@@ -708,11 +720,11 @@ supported:
 .. code-block:: pycon
 
     >>> r.pubsub_channels()
-    ['foo', 'bar']
+    [b'foo', b'bar']
     >>> r.pubsub_numsub('foo', 'bar')
-    [('foo', 9001), ('bar', 42)]
+    [(b'foo', 9001), (b'bar', 42)]
     >>> r.pubsub_numsub('baz')
-    [('baz', 0)]
+    [(b'baz', 0)]
     >>> r.pubsub_numpat()
     1204
 
@@ -833,7 +845,7 @@ operations).
     >>> slave = sentinel.slave_for('mymaster', socket_timeout=0.1)
     >>> master.set('foo', 'bar')
     >>> slave.get('foo')
-    'bar'
+    b'bar'
 
 The master and slave objects are normal Redis instances with their
 connection pool bound to the Sentinel instance. When a Sentinel backed client
@@ -863,7 +875,7 @@ that return Python iterators for convenience: `scan_iter`, `hscan_iter`,
     >>> for key, value in (('A', '1'), ('B', '2'), ('C', '3')):
     ...     r.set(key, value)
     >>> for key in r.scan_iter():
-    ...     print key, r.get(key)
+    ...     print(key, r.get(key))
     A 1
     B 2
     C 3
@@ -880,4 +892,3 @@ Special thanks to:
   which some of the socket code is still used.
 * Alexander Solovyov for ideas on the generic response callback system.
 * Paul Hubbard for initial packaging support.
-

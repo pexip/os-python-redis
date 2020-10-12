@@ -7,12 +7,12 @@ import redis
 import time
 
 from redis._compat import (unichr, ascii_letters, iteritems, iterkeys,
-                           itervalues, long)
+                           itervalues, long, basestring)
 from redis.client import parse_info
 from redis import exceptions
 
 from .conftest import (skip_if_server_version_lt, skip_if_server_version_gte,
-                       skip_unless_arch_bits)
+                       skip_unless_arch_bits, REDIS_6_VERSION)
 
 
 @pytest.fixture()
@@ -59,13 +59,186 @@ class TestResponseCallbacks(object):
 
 
 class TestRedisCommands(object):
-
     def test_command_on_invalid_key_type(self, r):
         r.lpush('a', '1')
         with pytest.raises(redis.ResponseError):
             r['a']
 
     # SERVER INFORMATION
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_cat_no_category(self, r):
+        categories = r.acl_cat()
+        assert isinstance(categories, list)
+        assert 'read' in categories
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_cat_with_category(self, r):
+        commands = r.acl_cat('read')
+        assert isinstance(commands, list)
+        assert 'get' in commands
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_deluser(self, r, request):
+        username = 'redis-py-user'
+
+        def teardown():
+            r.acl_deluser(username)
+
+        request.addfinalizer(teardown)
+
+        assert r.acl_deluser(username) == 0
+        assert r.acl_setuser(username, enabled=False, reset=True)
+        assert r.acl_deluser(username) == 1
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_genpass(self, r):
+        password = r.acl_genpass()
+        assert isinstance(password, basestring)
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_getuser_setuser(self, r, request):
+        username = 'redis-py-user'
+
+        def teardown():
+            r.acl_deluser(username)
+        request.addfinalizer(teardown)
+
+        # test enabled=False
+        assert r.acl_setuser(username, enabled=False, reset=True)
+        assert r.acl_getuser(username) == {
+            'categories': ['-@all'],
+            'commands': [],
+            'enabled': False,
+            'flags': ['off'],
+            'keys': [],
+            'passwords': [],
+        }
+
+        # test nopass=True
+        assert r.acl_setuser(username, enabled=True, reset=True, nopass=True)
+        assert r.acl_getuser(username) == {
+            'categories': ['-@all'],
+            'commands': [],
+            'enabled': True,
+            'flags': ['on', 'nopass'],
+            'keys': [],
+            'passwords': [],
+        }
+
+        # test all args
+        assert r.acl_setuser(username, enabled=True, reset=True,
+                             passwords=['+pass1', '+pass2'],
+                             categories=['+set', '+@hash', '-geo'],
+                             commands=['+get', '+mget', '-hset'],
+                             keys=['cache:*', 'objects:*'])
+        acl = r.acl_getuser(username)
+        assert set(acl['categories']) == set(['-@all', '+@set', '+@hash'])
+        assert set(acl['commands']) == set(['+get', '+mget', '-hset'])
+        assert acl['enabled'] is True
+        assert acl['flags'] == ['on']
+        assert set(acl['keys']) == set([b'cache:*', b'objects:*'])
+        assert len(acl['passwords']) == 2
+
+        # test reset=False keeps existing ACL and applies new ACL on top
+        assert r.acl_setuser(username, enabled=True, reset=True,
+                             passwords=['+pass1'],
+                             categories=['+@set'],
+                             commands=['+get'],
+                             keys=['cache:*'])
+        assert r.acl_setuser(username, enabled=True,
+                             passwords=['+pass2'],
+                             categories=['+@hash'],
+                             commands=['+mget'],
+                             keys=['objects:*'])
+        acl = r.acl_getuser(username)
+        assert set(acl['categories']) == set(['-@all', '+@set', '+@hash'])
+        assert set(acl['commands']) == set(['+get', '+mget'])
+        assert acl['enabled'] is True
+        assert acl['flags'] == ['on']
+        assert set(acl['keys']) == set([b'cache:*', b'objects:*'])
+        assert len(acl['passwords']) == 2
+
+        # test removal of passwords
+        assert r.acl_setuser(username, enabled=True, reset=True,
+                             passwords=['+pass1', '+pass2'])
+        assert len(r.acl_getuser(username)['passwords']) == 2
+        assert r.acl_setuser(username, enabled=True,
+                             passwords=['-pass2'])
+        assert len(r.acl_getuser(username)['passwords']) == 1
+
+        # Resets and tests that hashed passwords are set properly.
+        hashed_password = ('5e884898da28047151d0e56f8dc629'
+                           '2773603d0d6aabbdd62a11ef721d1542d8')
+        assert r.acl_setuser(username, enabled=True, reset=True,
+                             hashed_passwords=['+' + hashed_password])
+        acl = r.acl_getuser(username)
+        assert acl['passwords'] == [hashed_password]
+
+        # test removal of hashed passwords
+        assert r.acl_setuser(username, enabled=True, reset=True,
+                             hashed_passwords=['+' + hashed_password],
+                             passwords=['+pass1'])
+        assert len(r.acl_getuser(username)['passwords']) == 2
+        assert r.acl_setuser(username, enabled=True,
+                             hashed_passwords=['-' + hashed_password])
+        assert len(r.acl_getuser(username)['passwords']) == 1
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_list(self, r, request):
+        username = 'redis-py-user'
+
+        def teardown():
+            r.acl_deluser(username)
+        request.addfinalizer(teardown)
+
+        assert r.acl_setuser(username, enabled=False, reset=True)
+        users = r.acl_list()
+        assert 'user %s off -@all' % username in users
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_setuser_categories_without_prefix_fails(self, r, request):
+        username = 'redis-py-user'
+
+        def teardown():
+            r.acl_deluser(username)
+        request.addfinalizer(teardown)
+
+        with pytest.raises(exceptions.DataError):
+            r.acl_setuser(username, categories=['list'])
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_setuser_commands_without_prefix_fails(self, r, request):
+        username = 'redis-py-user'
+
+        def teardown():
+            r.acl_deluser(username)
+        request.addfinalizer(teardown)
+
+        with pytest.raises(exceptions.DataError):
+            r.acl_setuser(username, commands=['get'])
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_setuser_add_passwords_and_nopass_fails(self, r, request):
+        username = 'redis-py-user'
+
+        def teardown():
+            r.acl_deluser(username)
+        request.addfinalizer(teardown)
+
+        with pytest.raises(exceptions.DataError):
+            r.acl_setuser(username, passwords='+mypass', nopass=True)
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_users(self, r):
+        users = r.acl_users()
+        assert isinstance(users, list)
+        assert len(users) > 0
+
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_acl_whoami(self, r):
+        username = r.acl_whoami()
+        assert isinstance(username, basestring)
+
     def test_client_list(self, r):
         clients = r.client_list()
         assert isinstance(clients[0], dict)
@@ -694,6 +867,15 @@ class TestRedisCommands(object):
         assert r.set('a', '1', xx=True, px=10000)
         assert 0 < r.ttl('a') <= 10
 
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_set_keepttl(self, r):
+        r['a'] = 'val'
+        assert r.set('a', '1', xx=True, px=10000)
+        assert 0 < r.ttl('a') <= 10
+        r.set('a', '2', keepttl=True)
+        assert r.get('a') == b'2'
+        assert 0 < r.ttl('a') <= 10
+
     def test_setex(self, r):
         assert r.setex('a', 60, '1')
         assert r['a'] == b'1'
@@ -891,6 +1073,14 @@ class TestRedisCommands(object):
         _, keys = r.scan(match='a')
         assert set(keys) == {b'a'}
 
+    @skip_if_server_version_lt(REDIS_6_VERSION)
+    def test_scan_type(self, r):
+        r.sadd('a-set', 1)
+        r.hset('a-hash', 'foo', 2)
+        r.lpush('a-list', 'aux', 3)
+        _, keys = r.scan(match='a*', _type='SET')
+        assert set(keys) == {b'a-set'}
+
     @skip_if_server_version_lt('2.8.0')
     def test_scan_iter(self, r):
         r.set('a', 1)
@@ -920,7 +1110,7 @@ class TestRedisCommands(object):
 
     @skip_if_server_version_lt('2.8.0')
     def test_hscan(self, r):
-        r.hmset('a', {'a': 1, 'b': 2, 'c': 3})
+        r.hset('a', mapping={'a': 1, 'b': 2, 'c': 3})
         cursor, dic = r.hscan('a')
         assert cursor == 0
         assert dic == {b'a': b'1', b'b': b'2', b'c': b'3'}
@@ -929,7 +1119,7 @@ class TestRedisCommands(object):
 
     @skip_if_server_version_lt('2.8.0')
     def test_hscan_iter(self, r):
-        r.hmset('a', {'a': 1, 'b': 2, 'c': 3})
+        r.hset('a', mapping={'a': 1, 'b': 2, 'c': 3})
         dic = dict(r.hscan_iter('a'))
         assert dic == {b'a': b'1', b'b': b'2', b'c': b'3'}
         dic = dict(r.hscan_iter('a', match='a'))
@@ -1015,6 +1205,7 @@ class TestRedisCommands(object):
         assert value in s
         assert r.smembers('a') == set(s) - {value}
 
+    @skip_if_server_version_lt('3.2.0')
     def test_spop_multi_value(self, r):
         s = [b'1', b'2', b'3']
         r.sadd('a', *s)
@@ -1405,7 +1596,7 @@ class TestRedisCommands(object):
 
     # HASH COMMANDS
     def test_hget_and_hset(self, r):
-        r.hmset('a', {'1': 1, '2': 2, '3': 3})
+        r.hset('a', mapping={'1': 1, '2': 2, '3': 3})
         assert r.hget('a', '1') == b'1'
         assert r.hget('a', '2') == b'2'
         assert r.hget('a', '3') == b'3'
@@ -1421,21 +1612,40 @@ class TestRedisCommands(object):
         # key inside of hash that doesn't exist returns null value
         assert r.hget('a', 'b') is None
 
+        # keys with bool(key) == False
+        assert r.hset('a', 0, 10) == 1
+        assert r.hset('a', '', 10) == 1
+
+    def test_hset_with_multi_key_values(self, r):
+        r.hset('a', mapping={'1': 1, '2': 2, '3': 3})
+        assert r.hget('a', '1') == b'1'
+        assert r.hget('a', '2') == b'2'
+        assert r.hget('a', '3') == b'3'
+
+        r.hset('b', "foo", "bar", mapping={'1': 1, '2': 2})
+        assert r.hget('b', '1') == b'1'
+        assert r.hget('b', '2') == b'2'
+        assert r.hget('b', 'foo') == b'bar'
+
+    def test_hset_without_data(self, r):
+        with pytest.raises(exceptions.DataError):
+            r.hset("x")
+
     def test_hdel(self, r):
-        r.hmset('a', {'1': 1, '2': 2, '3': 3})
+        r.hset('a', mapping={'1': 1, '2': 2, '3': 3})
         assert r.hdel('a', '2') == 1
         assert r.hget('a', '2') is None
         assert r.hdel('a', '1', '3') == 2
         assert r.hlen('a') == 0
 
     def test_hexists(self, r):
-        r.hmset('a', {'1': 1, '2': 2, '3': 3})
+        r.hset('a', mapping={'1': 1, '2': 2, '3': 3})
         assert r.hexists('a', '1')
         assert not r.hexists('a', '4')
 
     def test_hgetall(self, r):
         h = {b'a1': b'1', b'a2': b'2', b'a3': b'3'}
-        r.hmset('a', h)
+        r.hset('a', mapping=h)
         assert r.hgetall('a') == h
 
     def test_hincrby(self, r):
@@ -1451,22 +1661,25 @@ class TestRedisCommands(object):
 
     def test_hkeys(self, r):
         h = {b'a1': b'1', b'a2': b'2', b'a3': b'3'}
-        r.hmset('a', h)
+        r.hset('a', mapping=h)
         local_keys = list(iterkeys(h))
         remote_keys = r.hkeys('a')
         assert (sorted(local_keys) == sorted(remote_keys))
 
     def test_hlen(self, r):
-        r.hmset('a', {'1': 1, '2': 2, '3': 3})
+        r.hset('a', mapping={'1': 1, '2': 2, '3': 3})
         assert r.hlen('a') == 3
 
     def test_hmget(self, r):
-        assert r.hmset('a', {'a': 1, 'b': 2, 'c': 3})
+        assert r.hset('a', mapping={'a': 1, 'b': 2, 'c': 3})
         assert r.hmget('a', 'a', 'b', 'c') == [b'1', b'2', b'3']
 
     def test_hmset(self, r):
+        warning_message = (r'^Redis\.hmset\(\) is deprecated\. '
+                           r'Use Redis\.hset\(\) instead\.$')
         h = {b'a': b'1', b'b': b'2', b'c': b'3'}
-        assert r.hmset('a', h)
+        with pytest.warns(DeprecationWarning, match=warning_message):
+            assert r.hmset('a', h)
         assert r.hgetall('a') == h
 
     def test_hsetnx(self, r):
@@ -1478,14 +1691,14 @@ class TestRedisCommands(object):
 
     def test_hvals(self, r):
         h = {b'a1': b'1', b'a2': b'2', b'a3': b'3'}
-        r.hmset('a', h)
+        r.hset('a', mapping=h)
         local_vals = list(itervalues(h))
         remote_vals = r.hvals('a')
         assert sorted(local_vals) == sorted(remote_vals)
 
     @skip_if_server_version_lt('3.2.0')
     def test_hstrlen(self, r):
-        r.hmset('a', {'1': '22', '2': '333'})
+        r.hset('a', mapping={'1': '22', '2': '333'})
         assert r.hstrlen('a', '1') == 2
         assert r.hstrlen('a', '2') == 3
 
@@ -2401,6 +2614,17 @@ class TestRedisCommands(object):
         assert resp == [0, None, 255]
 
     @skip_if_server_version_lt('4.0.0')
+    def test_memory_stats(self, r):
+        # put a key into the current db to make sure that "db.<current-db>"
+        # has data
+        r.set('foo', 'bar')
+        stats = r.memory_stats()
+        assert isinstance(stats, dict)
+        for key, value in iteritems(stats):
+            if key.startswith('db.'):
+                assert isinstance(value, dict)
+
+    @skip_if_server_version_lt('4.0.0')
     def test_memory_usage(self, r):
         r.set('foo', 'bar')
         assert isinstance(r.memory_usage('foo'), int)
@@ -2436,7 +2660,7 @@ class TestBinarySave(object):
             r.rpush(key, *value)
 
         # check that KEYS returns all the keys as they are
-        assert sorted(r.keys('*')) == sorted(list(iterkeys(mapping)))
+        assert sorted(r.keys('*')) == sorted(iterkeys(mapping))
 
         # check that it is possible to get list content by key name
         for key, value in iteritems(mapping):
