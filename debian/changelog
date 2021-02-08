@@ -1,3 +1,32 @@
+python-redis (3.5.3-2) unstable; urgency=medium
+
+  * Team upload.
+
+  [ Raphaël Hertzog ]
+  * Enable salsa-ci to detect autopkgtest failures earlier
+
+  [ Sophie Brun ]
+  * Use pytest to run autopkgtest: setup.py test is no
+    longer the correct way to run the tests. (Closes: #982134)
+
+ -- Sophie Brun <sophie@offensive-security.com>  Mon, 08 Feb 2021 11:30:27 +0100
+
+python-redis (3.5.3-1) unstable; urgency=medium
+
+  * Team upload.
+
+  [ Ondřej Nový ]
+  * d/control: Update Maintainer field with new Debian Python Team
+    contact address.
+  * d/control: Update Vcs-* fields with new Debian Python Team Salsa
+    layout.
+
+  [ Sophie Brun ]
+  * New upstream version 3.5.3
+  * Bump Standards-Version to 4.5.1 (no changes)
+
+ -- Sophie Brun <sophie@offensive-security.com>  Wed, 03 Feb 2021 10:26:44 +0100
+
 python-redis (3.3.11-3) unstable; urgency=medium
 
   * Drop python2 support; Closes: #938125

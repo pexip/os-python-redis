@@ -6,5 +6,5 @@ set -eux
 
 for X in $(py3versions -r 2>/dev/null)
 do
-	${X} setup.py test
+	${X} -m pytest -W always
 done

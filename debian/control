@@ -1,7 +1,7 @@
 Source: python-redis
 Section: python
 Priority: optional
-Maintainer: Debian Python Modules Team <python-modules-team@lists.alioth.debian.org>
+Maintainer: Debian Python Team <team+python@tracker.debian.org>
 Uploaders:
  Chris Lamb <lamby@debian.org>,
 Build-Depends:
@@ -9,9 +9,9 @@ Build-Depends:
  dh-python,
  python3-all,
  python3-setuptools,
-Standards-Version: 4.4.1
-Vcs-Git: https://salsa.debian.org/python-team/modules/python-redis.git
-Vcs-Browser: https://salsa.debian.org/python-team/modules/python-redis
+Standards-Version: 4.5.1
+Vcs-Git: https://salsa.debian.org/python-team/packages/python-redis.git
+Vcs-Browser: https://salsa.debian.org/python-team/packages/python-redis
 Homepage: https://github.com/andymccurdy/redis-py
 Rules-Requires-Root: no
 
