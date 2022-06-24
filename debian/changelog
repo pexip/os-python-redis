@@ -1,3 +1,9 @@
+python-redis (3.5.3-2pexip3) pexip-bullseye; urgency=medium
+
+  * Main bullseye build
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Fri, 24 Jun 2022 14:04:31 +0100
+
 python-redis (3.5.3-2pexip2) pexip; urgency=medium
 
   * Initial bullseye build
