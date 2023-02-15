@@ -1,0 +1,61 @@
+--- a/redis/commands/json/commands.py
++++ b/redis/commands/json/commands.py
+@@ -2,8 +2,6 @@
+ from json import JSONDecodeError, loads
+ from typing import Dict, List, Optional, Union
+ 
+-from deprecated import deprecated
+-
+ from redis.exceptions import DataError
+ 
+ from ._util import JsonType
+@@ -137,17 +135,6 @@
+             "JSON.NUMINCRBY", name, str(path), self._encode(number)
+         )
+ 
+-    @deprecated(version="4.0.0", reason="deprecated since redisjson 1.0.0")
+-    def nummultby(self, name: str, path: str, number: int) -> str:
+-        """Multiply the numeric (integer or floating point) JSON value under
+-        ``path`` at key ``name`` with the provided ``number``.
+-
+-        For more information see `JSON.NUMMULTBY <https://redis.io/commands/json.nummultby>`_.
+-        """  # noqa
+-        return self.execute_command(
+-            "JSON.NUMMULTBY", name, str(path), self._encode(number)
+-        )
+-
+     def clear(self, name: str, path: Optional[str] = Path.root_path()) -> int:
+         """Empty arrays and objects (to have zero slots/keys without deleting the
+         array/object).
+@@ -367,21 +354,3 @@
+             pieces.append(key)
+             pieces.append(str(path))
+         return self.execute_command("JSON.DEBUG", *pieces)
+-
+-    @deprecated(
+-        version="4.0.0", reason="redisjson-py supported this, call get directly."
+-    )
+-    def jsonget(self, *args, **kwargs):
+-        return self.get(*args, **kwargs)
+-
+-    @deprecated(
+-        version="4.0.0", reason="redisjson-py supported this, call get directly."
+-    )
+-    def jsonmget(self, *args, **kwargs):
+-        return self.mget(*args, **kwargs)
+-
+-    @deprecated(
+-        version="4.0.0", reason="redisjson-py supported this, call get directly."
+-    )
+-    def jsonset(self, *args, **kwargs):
+-        return self.set(*args, **kwargs)
+--- a/setup.py
++++ b/setup.py
+@@ -32,7 +32,6 @@
+     author_email="oss@redis.com",
+     python_requires=">=3.6",
+     install_requires=[
+-        "deprecated>=1.2.3",
+         "packaging>=20.4",
+         'importlib-metadata >= 1.0; python_version < "3.8"',
+         'typing-extensions; python_version<"3.8"',
