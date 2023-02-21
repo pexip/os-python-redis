@@ -1,3 +1,10 @@
+python-redis (4.3.4-3pexip3) pexip; urgency=medium
+
+  * Remove use of packaging
+  * Remove packaging as a dependency
+
+ -- Huw Jones <huw@pexip.com>  Tue, 21 Feb 2023 16:31:20 +0000
+
 python-redis (4.3.4-3pexip2) pexip; urgency=medium
 
   * Remove deprecated functions
