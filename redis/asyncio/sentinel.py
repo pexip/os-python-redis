@@ -1,7 +1,7 @@
 import asyncio
 import random
 import weakref
-from typing import AsyncIterator, Iterable, Mapping, Sequence, Tuple, Type
+from typing import AsyncIterator, Iterable, Mapping, Optional, Sequence, Tuple, Type
 
 from redis.asyncio.client import Redis
 from redis.asyncio.connection import (
@@ -44,7 +44,7 @@ class SentinelManagedConnection(Connection):
             if str_if_bytes(await self.read_response()) != "PONG":
                 raise ConnectionError("PING failed")
 
-    async def connect(self):
+    async def _connect_retry(self):
         if self._reader:
             return  # already connected
         if self.connection_pool.is_master:
@@ -57,9 +57,27 @@ class SentinelManagedConnection(Connection):
                     continue
             raise SlaveNotFoundError  # Never be here
 
-    async def read_response(self, disable_decoding: bool = False):
+    async def connect(self):
+        return await self.retry.call_with_retry(
+            self._connect_retry,
+            lambda error: asyncio.sleep(0),
+        )
+
+    async def read_response(
+        self,
+        disable_decoding: bool = False,
+        timeout: Optional[float] = None,
+        *,
+        disconnect_on_error: Optional[float] = True,
+        push_request: Optional[bool] = False,
+    ):
         try:
-            return await super().read_response(disable_decoding=disable_decoding)
+            return await super().read_response(
+                disable_decoding=disable_decoding,
+                timeout=timeout,
+                disconnect_on_error=disconnect_on_error,
+                push_request=push_request,
+            )
         except ReadOnlyError:
             if self.connection_pool.is_master:
                 # When talking to a master, a ReadOnlyError when likely
@@ -207,13 +225,13 @@ class Sentinel(AsyncSentinelCommands):
             kwargs.pop("once")
 
         if once:
+            await random.choice(self.sentinels).execute_command(*args, **kwargs)
+        else:
             tasks = [
                 asyncio.Task(sentinel.execute_command(*args, **kwargs))
                 for sentinel in self.sentinels
             ]
             await asyncio.gather(*tasks)
-        else:
-            await random.choice(self.sentinels).execute_command(*args, **kwargs)
         return True
 
     def __repr__(self):
@@ -241,10 +259,12 @@ class Sentinel(AsyncSentinelCommands):
         Returns a pair (address, port) or raises MasterNotFoundError if no
         master is found.
         """
+        collected_errors = list()
         for sentinel_no, sentinel in enumerate(self.sentinels):
             try:
                 masters = await sentinel.sentinel_masters()
-            except (ConnectionError, TimeoutError):
+            except (ConnectionError, TimeoutError) as e:
+                collected_errors.append(f"{sentinel} - {e!r}")
                 continue
             state = masters.get(service_name)
             if state and self.check_master_state(state, service_name):
@@ -254,7 +274,11 @@ class Sentinel(AsyncSentinelCommands):
                     self.sentinels[0],
                 )
                 return state["ip"], state["port"]
-        raise MasterNotFoundError(f"No master found for {service_name!r}")
+
+        error_info = ""
+        if len(collected_errors) > 0:
+            error_info = f" : {', '.join(collected_errors)}"
+        raise MasterNotFoundError(f"No master found for {service_name!r}{error_info}")
 
     def filter_slaves(
         self, slaves: Iterable[Mapping]
@@ -313,11 +337,10 @@ class Sentinel(AsyncSentinelCommands):
         kwargs["is_master"] = True
         connection_kwargs = dict(self.connection_kwargs)
         connection_kwargs.update(kwargs)
-        return redis_class(
-            connection_pool=connection_pool_class(
-                service_name, self, **connection_kwargs
-            )
-        )
+
+        connection_pool = connection_pool_class(service_name, self, **connection_kwargs)
+        # The Redis object "owns" the pool
+        return redis_class.from_pool(connection_pool)
 
     def slave_for(
         self,
@@ -346,8 +369,7 @@ class Sentinel(AsyncSentinelCommands):
         kwargs["is_master"] = False
         connection_kwargs = dict(self.connection_kwargs)
         connection_kwargs.update(kwargs)
-        return redis_class(
-            connection_pool=connection_pool_class(
-                service_name, self, **connection_kwargs
-            )
-        )
+
+        connection_pool = connection_pool_class(service_name, self, **connection_kwargs)
+        # The Redis object "owns" the pool
+        return redis_class.from_pool(connection_pool)

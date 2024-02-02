@@ -1,5 +1,7 @@
 import sys
 
+from redis import asyncio  # noqa
+from redis.backoff import default_backoff
 from redis.client import Redis, StrictRedis
 from redis.cluster import RedisCluster
 from redis.connection import (
@@ -9,6 +11,7 @@ from redis.connection import (
     SSLConnection,
     UnixDomainSocketConnection,
 )
+from redis.credentials import CredentialProvider, UsernamePasswordCredentialProvider
 from redis.exceptions import (
     AuthenticationError,
     AuthenticationWrongNumberOfArgsError,
@@ -17,6 +20,7 @@ from redis.exceptions import (
     ConnectionError,
     DataError,
     InvalidResponse,
+    OutOfMemoryError,
     PubSubError,
     ReadOnlyError,
     RedisError,
@@ -51,7 +55,10 @@ except metadata.PackageNotFoundError:
     __version__ = "99.99.99"
 
 
-VERSION = tuple(map(int_or_str, __version__.split(".")))
+try:
+    VERSION = tuple(map(int_or_str, __version__.split(".")))
+except AttributeError:
+    VERSION = tuple([99, 99, 99])
 
 __all__ = [
     "AuthenticationError",
@@ -62,9 +69,12 @@ __all__ = [
     "Connection",
     "ConnectionError",
     "ConnectionPool",
+    "CredentialProvider",
     "DataError",
     "from_url",
+    "default_backoff",
     "InvalidResponse",
+    "OutOfMemoryError",
     "PubSubError",
     "ReadOnlyError",
     "Redis",
@@ -76,6 +86,7 @@ __all__ = [
     "SentinelManagedConnection",
     "SentinelManagedSSLConnection",
     "SSLConnection",
+    "UsernamePasswordCredentialProvider",
     "StrictRedis",
     "TimeoutError",
     "UnixDomainSocketConnection",

@@ -1,27 +1,17 @@
-import asyncio
 import random
-import sys
+from contextlib import asynccontextmanager as _asynccontextmanager
 from typing import Union
-from urllib.parse import urlparse
-
-if sys.version_info[0:2] == (3, 6):
-    import pytest as pytest_asyncio
-else:
-    import pytest_asyncio
 
 import pytest
-from packaging.version import Version
-
+import pytest_asyncio
 import redis.asyncio as redis
+from packaging.version import Version
+from redis._parsers import _AsyncHiredisParser, _AsyncRESP2Parser
 from redis.asyncio.client import Monitor
-from redis.asyncio.connection import (
-    HIREDIS_AVAILABLE,
-    HiredisParser,
-    PythonParser,
-    parse_url,
-)
+from redis.asyncio.connection import Connection, parse_url
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
+from redis.utils import HIREDIS_AVAILABLE
 from tests.conftest import REDIS_INFO
 
 from .compat import mock
@@ -37,14 +27,14 @@ async def _get_info(redis_url):
 @pytest_asyncio.fixture(
     params=[
         pytest.param(
-            (True, PythonParser),
+            (True, _AsyncRESP2Parser),
             marks=pytest.mark.skipif(
                 'config.REDIS_INFO["cluster_enabled"]', reason="cluster mode enabled"
             ),
         ),
-        (False, PythonParser),
+        (False, _AsyncRESP2Parser),
         pytest.param(
-            (True, HiredisParser),
+            (True, _AsyncHiredisParser),
             marks=[
                 pytest.mark.skipif(
                     'config.REDIS_INFO["cluster_enabled"]',
@@ -56,7 +46,7 @@ async def _get_info(redis_url):
             ],
         ),
         pytest.param(
-            (False, HiredisParser),
+            (False, _AsyncHiredisParser),
             marks=pytest.mark.skipif(
                 not HIREDIS_AVAILABLE, reason="hiredis is not installed"
             ),
@@ -69,16 +59,22 @@ async def _get_info(redis_url):
         "pool-hiredis",
     ],
 )
-def create_redis(request, event_loop: asyncio.BaseEventLoop):
+async def create_redis(request):
     """Wrapper around redis.create_redis."""
     single_connection, parser_cls = request.param
 
-    async def f(
+    teardown_clients = []
+
+    async def client_factory(
         url: str = request.config.getoption("--redis-url"),
         cls=redis.Redis,
         flushdb=True,
+        protocol=request.config.getoption("--protocol"),
         **kwargs,
     ):
+        if "protocol" not in url:
+            kwargs["protocol"] = request.config.getoption("--protocol")
+
         cluster_mode = REDIS_INFO["cluster_enabled"]
         if not cluster_mode:
             single = kwargs.pop("single_connection_client", False) or single_connection
@@ -95,78 +91,72 @@ def create_redis(request, event_loop: asyncio.BaseEventLoop):
             client = client.client()
             await client.initialize()
 
-        def teardown():
-            async def ateardown():
-                if not cluster_mode:
-                    if "username" in kwargs:
-                        return
-                    if flushdb:
-                        try:
-                            await client.flushdb()
-                        except redis.ConnectionError:
-                            # handle cases where a test disconnected a client
-                            # just manually retry the flushdb
-                            await client.flushdb()
-                    await client.close()
-                    await client.connection_pool.disconnect()
-                else:
-                    if flushdb:
-                        try:
-                            await client.flushdb(target_nodes="primaries")
-                        except redis.ConnectionError:
-                            # handle cases where a test disconnected a client
-                            # just manually retry the flushdb
-                            await client.flushdb(target_nodes="primaries")
-                    await client.close()
-
-            if event_loop.is_running():
-                event_loop.create_task(ateardown())
+        async def teardown():
+            if not cluster_mode:
+                if flushdb and "username" not in kwargs:
+                    try:
+                        await client.flushdb()
+                    except redis.ConnectionError:
+                        # handle cases where a test disconnected a client
+                        # just manually retry the flushdb
+                        await client.flushdb()
+                await client.aclose()
+                await client.connection_pool.disconnect()
             else:
-                event_loop.run_until_complete(ateardown())
+                if flushdb:
+                    try:
+                        await client.flushdb(target_nodes="primaries")
+                    except redis.ConnectionError:
+                        # handle cases where a test disconnected a client
+                        # just manually retry the flushdb
+                        await client.flushdb(target_nodes="primaries")
+                await client.aclose()
 
-        request.addfinalizer(teardown)
-
+        teardown_clients.append(teardown)
         return client
 
-    return f
+    yield client_factory
+
+    for teardown in teardown_clients:
+        await teardown()
 
 
 @pytest_asyncio.fixture()
-async def r(request, create_redis):
-    yield await create_redis()
+async def r(create_redis):
+    return await create_redis()
 
 
 @pytest_asyncio.fixture()
 async def r2(create_redis):
     """A second client for tests that need multiple"""
-    yield await create_redis()
+    return await create_redis()
 
 
 @pytest_asyncio.fixture()
-async def modclient(request, create_redis):
-    yield await create_redis(
-        url=request.config.getoption("--redismod-url"), decode_responses=True
-    )
+async def decoded_r(create_redis):
+    return await create_redis(decode_responses=True)
 
 
 def _gen_cluster_mock_resp(r, response):
-    connection = mock.AsyncMock()
+    connection = mock.AsyncMock(spec=Connection)
     connection.retry = Retry(NoBackoff(), 0)
     connection.read_response.return_value = response
-    r.connection = connection
-    return r
+    with mock.patch.object(r, "connection", connection):
+        yield r
 
 
 @pytest_asyncio.fixture()
 async def mock_cluster_resp_ok(create_redis, **kwargs):
     r = await create_redis(**kwargs)
-    return _gen_cluster_mock_resp(r, "OK")
+    for mocked in _gen_cluster_mock_resp(r, "OK"):
+        yield mocked
 
 
 @pytest_asyncio.fixture()
 async def mock_cluster_resp_int(create_redis, **kwargs):
     r = await create_redis(**kwargs)
-    return _gen_cluster_mock_resp(r, "2")
+    for mocked in _gen_cluster_mock_resp(r, 2):
+        yield mocked
 
 
 @pytest_asyncio.fixture()
@@ -180,7 +170,8 @@ async def mock_cluster_resp_info(create_redis, **kwargs):
         "cluster_my_epoch:2\r\ncluster_stats_messages_sent:170262\r\n"
         "cluster_stats_messages_received:105653\r\n"
     )
-    return _gen_cluster_mock_resp(r, response)
+    for mocked in _gen_cluster_mock_resp(r, response):
+        yield mocked
 
 
 @pytest_asyncio.fixture()
@@ -204,7 +195,8 @@ async def mock_cluster_resp_nodes(create_redis, **kwargs):
         "fbb23ed8cfa23f17eaf27ff7d0c410492a1093d6 172.17.0.7:7002 "
         "master,fail - 1447829446956 1447829444948 1 disconnected\n"
     )
-    return _gen_cluster_mock_resp(r, response)
+    for mocked in _gen_cluster_mock_resp(r, response):
+        yield mocked
 
 
 @pytest_asyncio.fixture()
@@ -215,14 +207,8 @@ async def mock_cluster_resp_slaves(create_redis, **kwargs):
         "slave 19efe5a631f3296fdf21a5441680f893e8cc96ec 0 "
         "1447836789290 3 connected']"
     )
-    return _gen_cluster_mock_resp(r, response)
-
-
-@pytest_asyncio.fixture(scope="session")
-def master_host(request):
-    url = request.config.getoption("--redis-url")
-    parts = urlparse(url)
-    yield parts.hostname
+    for mocked in _gen_cluster_mock_resp(r, response):
+        yield mocked
 
 
 async def wait_for_command(
@@ -246,3 +232,41 @@ async def wait_for_command(
             return monitor_response
         if key in monitor_response["command"]:
             return None
+
+
+# python 3.6 doesn't have the asynccontextmanager decorator.  Provide it here.
+class AsyncContextManager:
+    def __init__(self, async_generator):
+        self.gen = async_generator
+
+    async def __aenter__(self):
+        try:
+            return await self.gen.__anext__()
+        except StopAsyncIteration as err:
+            raise RuntimeError("Pickles") from err
+
+    async def __aexit__(self, exc_type, exc_inst, tb):
+        if exc_type:
+            await self.gen.athrow(exc_type, exc_inst, tb)
+            return True
+        try:
+            await self.gen.__anext__()
+        except StopAsyncIteration:
+            return
+        raise RuntimeError("More pickles")
+
+
+def asynccontextmanager(func):
+    return _asynccontextmanager(func)
+
+
+# helpers to get the connection arguments for this run
+@pytest.fixture()
+def redis_url(request):
+    return request.config.getoption("--redis-url")
+
+
+@pytest.fixture()
+def connect_args(request):
+    url = request.config.getoption("--redis-url")
+    return parse_url(url)

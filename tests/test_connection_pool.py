@@ -1,13 +1,14 @@
 import os
 import re
 import time
+from contextlib import closing
 from threading import Thread
 from unittest import mock
 
 import pytest
-
 import redis
-from redis.connection import ssl_available, to_bool
+from redis.connection import to_bool
+from redis.utils import SSL_AVAILABLE
 
 from .conftest import _get_client, skip_if_redis_enterprise, skip_if_server_version_lt
 from .test_pubsub import wait_for_message
@@ -50,6 +51,16 @@ class TestConnectionPool:
         connection = pool.get_connection("_")
         assert isinstance(connection, DummyConnection)
         assert connection.kwargs == connection_kwargs
+
+    def test_closing(self):
+        connection_kwargs = {"foo": "bar", "biz": "baz"}
+        pool = redis.ConnectionPool(
+            connection_class=DummyConnection,
+            max_connections=None,
+            **connection_kwargs,
+        )
+        with closing(pool):
+            pass
 
     def test_multiple_connections(self, master_host):
         connection_kwargs = {"host": master_host[0], "port": master_host[1]}
@@ -314,7 +325,7 @@ class TestConnectionPoolURLParsing:
     def test_invalid_extra_typed_querystring_options(self):
         with pytest.raises(ValueError):
             redis.ConnectionPool.from_url(
-                "redis://localhost/2?socket_timeout=_&" "socket_connect_timeout=abc"
+                "redis://localhost/2?socket_timeout=_&socket_connect_timeout=abc"
             )
 
     def test_extra_querystring_options(self):
@@ -334,6 +345,14 @@ class TestConnectionPoolURLParsing:
     def test_invalid_scheme_raises_error(self):
         with pytest.raises(ValueError) as cm:
             redis.ConnectionPool.from_url("localhost")
+        assert str(cm.value) == (
+            "Redis URL must specify one of the following schemes "
+            "(redis://, rediss://, unix://)"
+        )
+
+    def test_invalid_scheme_raises_error_when_double_slash_missing(self):
+        with pytest.raises(ValueError) as cm:
+            redis.ConnectionPool.from_url("redis:foo.bar.com:12345")
         assert str(cm.value) == (
             "Redis URL must specify one of the following schemes "
             "(redis://, rediss://, unix://)"
@@ -417,7 +436,7 @@ class TestConnectionPoolUnixSocketURLParsing:
         assert pool.connection_class == MyConnection
 
 
-@pytest.mark.skipif(not ssl_available, reason="SSL not installed")
+@pytest.mark.skipif(not SSL_AVAILABLE, reason="SSL not installed")
 class TestSSLConnectionURLParsing:
     def test_host(self):
         pool = redis.ConnectionPool.from_url("rediss://my.host")
@@ -520,9 +539,16 @@ class TestConnection:
     @skip_if_server_version_lt("2.8.8")
     @skip_if_redis_enterprise()
     def test_read_only_error(self, r):
-        "READONLY errors get turned in ReadOnlyError exceptions"
+        "READONLY errors get turned into ReadOnlyError exceptions"
         with pytest.raises(redis.ReadOnlyError):
             r.execute_command("DEBUG", "ERROR", "READONLY blah blah")
+
+    def test_oom_error(self, r):
+        "OOM errors get turned into OutOfMemoryError exceptions"
+        with pytest.raises(redis.OutOfMemoryError):
+            # note: don't use the DEBUG OOM command since it's not the same
+            # as the db being full
+            r.execute_command("DEBUG", "ERROR", "OOM blah blah")
 
     def test_connect_from_url_tcp(self):
         connection = redis.Redis.from_url("redis://localhost")
@@ -545,21 +571,39 @@ class TestConnection:
         )
 
     @skip_if_redis_enterprise()
-    def test_connect_no_auth_supplied_when_required(self, r):
+    def test_connect_no_auth_configured(self, r):
         """
-        AuthenticationError should be raised when the server requires a
-        password but one isn't supplied.
+        AuthenticationError should be raised when the server is not configured with auth
+        but credentials are supplied by the user.
         """
+        # Redis < 6
         with pytest.raises(redis.AuthenticationError):
             r.execute_command(
                 "DEBUG", "ERROR", "ERR Client sent AUTH, but no password is set"
             )
 
+        # Redis >= 6
+        with pytest.raises(redis.AuthenticationError):
+            r.execute_command(
+                "DEBUG",
+                "ERROR",
+                "ERR AUTH <password> called without any password "
+                "configured for the default user. Are you sure "
+                "your configuration is correct?",
+            )
+
     @skip_if_redis_enterprise()
-    def test_connect_invalid_password_supplied(self, r):
-        "AuthenticationError should be raised when sending the wrong password"
+    def test_connect_invalid_auth_credentials_supplied(self, r):
+        """
+        AuthenticationError should be raised when sending invalid username/password
+        """
+        # Redis < 6
         with pytest.raises(redis.AuthenticationError):
             r.execute_command("DEBUG", "ERROR", "ERR invalid password")
+
+        # Redis >= 6
+        with pytest.raises(redis.AuthenticationError):
+            r.execute_command("DEBUG", "ERROR", "WRONGPASS")
 
 
 @pytest.mark.onlynoncluster

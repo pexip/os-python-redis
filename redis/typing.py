@@ -1,14 +1,23 @@
 # from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Awaitable, Iterable, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Iterable,
+    Mapping,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from redis.compat import Protocol
 
 if TYPE_CHECKING:
+    from redis._parsers import Encoder
     from redis.asyncio.connection import ConnectionPool as AsyncConnectionPool
-    from redis.asyncio.connection import Encoder as AsyncEncoder
-    from redis.connection import ConnectionPool, Encoder
+    from redis.connection import ConnectionPool
 
 
 Number = Union[int, float]
@@ -16,7 +25,7 @@ EncodedT = Union[bytes, memoryview]
 DecodedT = Union[str, int, float]
 EncodableT = Union[EncodedT, DecodedT]
 AbsExpiryT = Union[int, datetime]
-ExpiryT = Union[float, timedelta]
+ExpiryT = Union[int, timedelta]
 ZScoreBoundT = Union[float, str]  # str allows for the [ or ( prefix
 BitfieldOffsetT = Union[int, str]  # str allows for #x syntax
 _StringLikeT = Union[bytes, str, memoryview]
@@ -39,6 +48,8 @@ AnyKeyT = TypeVar("AnyKeyT", bytes, str, memoryview)
 AnyFieldT = TypeVar("AnyFieldT", bytes, str, memoryview)
 AnyChannelT = TypeVar("AnyChannelT", bytes, str, memoryview)
 
+ExceptionMappingT = Mapping[str, Union[Type[Exception], Mapping[str, Type[Exception]]]]
+
 
 class CommandsProtocol(Protocol):
     connection_pool: Union["AsyncConnectionPool", "ConnectionPool"]
@@ -47,8 +58,8 @@ class CommandsProtocol(Protocol):
         ...
 
 
-class ClusterCommandsProtocol(CommandsProtocol):
-    encoder: Union["AsyncEncoder", "Encoder"]
+class ClusterCommandsProtocol(CommandsProtocol, Protocol):
+    encoder: "Encoder"
 
     def execute_command(self, *args, **options) -> Union[Any, Awaitable]:
         ...

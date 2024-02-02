@@ -1,14 +1,13 @@
-import os
 import socket
 import ssl
 from urllib.parse import urlparse
 
 import pytest
-
 import redis
 from redis.exceptions import ConnectionError, RedisError
 
 from .conftest import skip_if_cryptography, skip_if_nocryptography
+from .ssl_utils import get_ssl_filename
 
 
 @pytest.mark.ssl
@@ -19,17 +18,8 @@ class TestSSL:
     and connecting to the appropriate port.
     """
 
-    ROOT = os.path.join(os.path.dirname(__file__), "..")
-    CERT_DIR = os.path.abspath(os.path.join(ROOT, "docker", "stunnel", "keys"))
-    if not os.path.isdir(CERT_DIR):  # github actions package validation case
-        CERT_DIR = os.path.abspath(
-            os.path.join(ROOT, "..", "docker", "stunnel", "keys")
-        )
-        if not os.path.isdir(CERT_DIR):
-            raise IOError(f"No SSL certificates found. They should be in {CERT_DIR}")
-
-    SERVER_CERT = os.path.join(CERT_DIR, "server-cert.pem")
-    SERVER_KEY = os.path.join(CERT_DIR, "server-key.pem")
+    SERVER_CERT = get_ssl_filename("server-cert.pem")
+    SERVER_KEY = get_ssl_filename("server-key.pem")
 
     def test_ssl_with_invalid_cert(self, request):
         ssl_url = request.config.option.redis_ssl_url
@@ -68,8 +58,8 @@ class TestSSL:
         assert r.ping()
 
     def test_validating_self_signed_string_certificate(self, request):
-        f = open(self.SERVER_CERT)
-        cert_data = f.read()
+        with open(self.SERVER_CERT) as f:
+            cert_data = f.read()
         ssl_url = request.config.option.redis_ssl_url
         p = urlparse(ssl_url)[1].split(":")
         r = redis.Redis(
