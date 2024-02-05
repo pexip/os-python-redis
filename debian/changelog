@@ -1,3 +1,10 @@
+python-redis (4.3.4-3+pexip24u7) pexip; urgency=medium
+
+  * client: fix retry_on_error for pipeline and pubsub
+    See https://github.com/redis/redis-py/issues/2973
+
+ -- Huw Jones <huw@pexip.com>  Mon, 05 Feb 2024 17:20:04 +0000
+
 python-redis (4.3.4-3+pexip24u6) pexip-bookworm; urgency=medium
 
   * New versioning scheme

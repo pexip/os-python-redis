@@ -1,0 +1,168 @@
+From 1dd21d6c35482753ef00700151b9f549ac2bfa5f Mon Sep 17 00:00:00 2001
+From: Will Miller <will.miller@pexip.com>
+Date: Fri, 2 Feb 2024 16:59:36 +0000
+Subject: [PATCH] client: fix retry_on_error for pipeline and pubsub
+
+Extend the fix from bea72995fd39b01e2f0a1682b16b6c7690933f36 to apply to
+pipeline and pubsub as well.
+
+Fixes https://github.com/redis/redis-py/issues/2973
+---
+ redis/asyncio/client.py | 36 ++++++++++++++++++-----------
+ redis/client.py         | 50 ++++++++++++++++++++++++++++-------------
+ 2 files changed, 57 insertions(+), 29 deletions(-)
+
+diff --git a/redis/asyncio/client.py b/redis/asyncio/client.py
+index e4d2e77..1c28361 100644
+--- a/redis/asyncio/client.py
++++ b/redis/asyncio/client.py
+@@ -722,11 +722,15 @@ async def connect(self):
+     async def _disconnect_raise_connect(self, conn, error):
+         """
+         Close the connection and raise an exception
+-        if retry_on_timeout is not set or the error
+-        is not a TimeoutError. Otherwise, try to reconnect
++        if retry_on_error is not set or the error is not one
++        of the specified error types. Otherwise, try to
++        reconnect
+         """
+         await conn.disconnect()
+-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
++        if (
++            conn.retry_on_error is None
++            or isinstance(error, tuple(conn.retry_on_error)) is False
++        ):
+             raise error
+         await conn.connect()
+ 
+@@ -1122,8 +1126,8 @@ async def _disconnect_reset_raise(self, conn, error):
+         """
+         Close the connection, reset watching state and
+         raise an exception if we were watching,
+-        retry_on_timeout is not set,
+-        or the error is not a TimeoutError
++        if retry_on_error is not set or the error is not one
++        of the specified error types.
+         """
+         await conn.disconnect()
+         # if we were already watching a variable, the watch is no longer
+@@ -1134,9 +1138,12 @@ async def _disconnect_reset_raise(self, conn, error):
+             raise WatchError(
+                 "A ConnectionError occurred on while " "watching one or more keys"
+             )
+-        # if retry_on_timeout is not set, or the error is not
+-        # a TimeoutError, raise it
+-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
++        # if retry_on_error is not set or the error is not one
++        # of the specified error types, raise it
++        if (
++            conn.retry_on_error is None
++            or isinstance(error, tuple(conn.retry_on_error)) is False
++        ):
+             await self.reset()
+             raise
+ 
+@@ -1311,8 +1318,8 @@
+     async def _disconnect_raise_reset(self, conn: Connection, error: Exception):
+         """
+         Close the connection, raise an exception if we were watching,
+-        and raise an exception if retry_on_timeout is not set,
+-        or the error is not a TimeoutError
++        and raise an exception if retry_on_error is not set or the
++        error is not one of the specified error types.
+         """
+         await conn.disconnect()
+         # if we were watching a variable, the watch is no longer valid
+@@ -1322,9 +1329,12 @@
+             raise WatchError(
+                 "A ConnectionError occurred on while " "watching one or more keys"
+             )
+-        # if retry_on_timeout is not set, or the error is not
+-        # a TimeoutError, raise it
+-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
++        # if retry_on_error is not set or the error is not one
++        # of the specified error types, raise it
++        if (
++            conn.retry_on_error is None
++            or isinstance(error, tuple(conn.retry_on_error)) is False
++        ):
+             await self.reset()
+             raise
+ 
+diff --git a/redis/client.py b/redis/client.py
+index 4923143..dfcc2bb 100755
+--- a/redis/client.py
++++ b/redis/client.py
+@@ -1463,11 +1463,15 @@ class PubSub:
+     def _disconnect_raise_connect(self, conn, error):
+         """
+         Close the connection and raise an exception
+-        if retry_on_timeout is not set or the error
+-        is not a TimeoutError. Otherwise, try to reconnect
++        if retry_on_error is not set or the error is not one
++        of the specified error types. Otherwise, try to
++        reconnect
+         """
+         conn.disconnect()
+-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
++        if (
++            conn.retry_on_error is None
++            or isinstance(error, tuple(conn.retry_on_error)) is False
++        ):
+             raise error
+         conn.connect()
+
+@@ -1863,8 +1867,8 @@ class Pipeline(Redis):
+         """
+         Close the connection, reset watching state and
+         raise an exception if we were watching,
+-        retry_on_timeout is not set,
+-        or the error is not a TimeoutError
++        if retry_on_error is not set or the error is not one
++        of the specified error types.
+         """
+         conn.disconnect()
+         # if we were already watching a variable, the watch is no longer
+@@ -1875,9 +1879,12 @@ class Pipeline(Redis):
+             raise WatchError(
+                 "A ConnectionError occurred on while " "watching one or more keys"
+             )
+-        # if retry_on_timeout is not set, or the error is not
+-        # a TimeoutError, raise it
+-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
++        # if retry_on_error is not set or the error is not one
++        # of the specified error types, raise it
++        if (
++            conn.retry_on_error is None
++            or isinstance(error, tuple(conn.retry_on_error)) is False
++        ):
+             self.reset()
+             raise
+
+@@ -2038,8 +2045,8 @@ class Pipeline(Redis):
+     def _disconnect_raise_reset(self, conn, error):
+         """
+         Close the connection, raise an exception if we were watching,
+-        and raise an exception if retry_on_timeout is not set,
+-        or the error is not a TimeoutError
++        and raise an exception if retry_on_error is not set or the
++        error is not one of the specified error types.
+         """
+         conn.disconnect()
+         # if we were watching a variable, the watch is no longer valid
+@@ -2049,9 +2056,13 @@ class Pipeline(Redis):
+             raise WatchError(
+                 "A ConnectionError occurred on while " "watching one or more keys"
+             )
+-        # if retry_on_timeout is not set, or the error is not
+-        # a TimeoutError, raise it
+-        if not (conn.retry_on_timeout and isinstance(error, TimeoutError)):
++        # if retry_on_error is not set or the error is not one
++        # of the specified error types, raise it
++        if (
++            conn.retry_on_error is None
++            or isinstance(error, tuple(conn.retry_on_error)) is False
++        ):
++
+             self.reset()
+             raise
