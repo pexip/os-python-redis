@@ -1,3 +1,11 @@
+python-redis (4.3.4-3+pexip24u8) pexip; urgency=medium
+
+  * AsyncIO Race Condition Fix.
+    See https://github.com/redis/redis-py/issues/2624 and
+    see https://github.com/redis/redis-py/issues/2579
+
+ -- Huw Jones <huw@pexip.com>  Wed, 13 Mar 2024 14:42:50 +0000
+
 python-redis (4.3.4-3+pexip24u7) pexip; urgency=medium
 
   * client: fix retry_on_error for pipeline and pubsub

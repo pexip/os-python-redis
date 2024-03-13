@@ -1,3 +1,4 @@
 pexip-0001-remove-deprecated.patch
 pexip-0002-remove-packaging.patch
 pexip-0003-retry_on_error-fix.patch
+upstream-0001-asyncio_race_condition.patch

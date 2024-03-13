@@ -1,0 +1,123 @@
+From 7b48b1bb34f97e4adf32c12a987ff593dc536aef Mon Sep 17 00:00:00 2001
+From: Chayim <chayim@users.noreply.github.com>
+Date: Wed, 22 Mar 2023 18:04:42 +0200
+Subject: [PATCH] AsyncIO Race Condition Fix (#2639)
+
+---
+ redis/asyncio/client.py               | 12 +++++++++---
+ redis/asyncio/cluster.py              | 12 ++++++++++--
+ tests/test_asyncio/test_cluster.py    | 17 +++++++++++++++++
+ tests/test_asyncio/test_connection.py | 23 +++++++++++++++++++++++
+ 6 files changed, 64 insertions(+), 8 deletions(-)
+
+diff --git a/redis/asyncio/client.py b/redis/asyncio/client.py
+index 3d59016bb3..5c0b546bf5 100644
+--- a/redis/asyncio/client.py
++++ b/redis/asyncio/client.py
+@@ -1359,10 +1359,16 @@ async def execute(self, raise_on_error: bool = True):
+         conn = cast(Connection, conn)
+ 
+         try:
+-            return await conn.retry.call_with_retry(
+-                lambda: execute(conn, stack, raise_on_error),
+-                lambda error: self._disconnect_raise_reset(conn, error),
++            return await asyncio.shield(
++                conn.retry.call_with_retry(
++                    lambda: execute(conn, stack, raise_on_error),
++                    lambda error: self._disconnect_raise_reset(conn, error),
++                )
+             )
++        except asyncio.CancelledError:
++            # not supposed to be possible, yet here we are
++            await conn.disconnect(nowait=True)
++            raise
+         finally:
+             await self.reset()
+ 
+diff --git a/redis/asyncio/cluster.py b/redis/asyncio/cluster.py
+index 3fe3ebc47e..8dfb1cbdb8 100644
+--- a/redis/asyncio/cluster.py
++++ b/redis/asyncio/cluster.py
+@@ -881,10 +881,18 @@ async def execute_command(self, *args: Any, **kwargs: Any) -> Any:
+         await connection.send_packed_command(connection.pack_command(*args), False)
+ 
+         # Read response
++        return await asyncio.shield(
++            self._parse_and_release(connection, args[0], **kwargs)
++        )
++
++    async def _parse_and_release(self, connection, *args, **kwargs):
+         try:
+-            return await self.parse_response(connection, args[0], **kwargs)
++            return await self.parse_response(connection, *args, **kwargs)
++        except asyncio.CancelledError:
++            # should not be possible
++            await connection.disconnect(nowait=True)
++            raise
+         finally:
+-            # Release connection
+             self._free.append(connection)
+ 
+     async def execute_pipeline(self) -> bool:
+diff --git a/tests/test_asyncio/test_cluster.py b/tests/test_asyncio/test_cluster.py
+index d6e01f79dc..2e44cdde3e 100644
+--- a/tests/test_asyncio/test_cluster.py
++++ b/tests/test_asyncio/test_cluster.py
+@@ -333,6 +333,23 @@ async def test_execute_command_node_flag_random(self, r: RedisCluster) -> None:
+                 called_count += 1
+         assert called_count == 1
+ 
++    async def test_asynckills(self, r) -> None:
++
++        await r.set("foo", "foo")
++        await r.set("bar", "bar")
++
++        t = asyncio.create_task(r.get("foo"))
++        await asyncio.sleep(1)
++        t.cancel()
++        try:
++            await t
++        except asyncio.CancelledError:
++            pytest.fail("connection is left open with unread response")
++
++        assert await r.get("bar") == b"bar"
++        assert await r.ping()
++        assert await r.get("foo") == b"foo"
++
+     async def test_execute_command_default_node(self, r: RedisCluster) -> None:
+         """
+         Test command execution without node flag is being executed on the
+diff --git a/tests/test_asyncio/test_connection.py b/tests/test_asyncio/test_connection.py
+index f6259adbd2..c414ee05cc 100644
+--- a/tests/test_asyncio/test_connection.py
++++ b/tests/test_asyncio/test_connection.py
+@@ -28,6 +28,29 @@ async def test_invalid_response(create_redis):
+     assert str(cm.value) == f"Protocol Error: {raw!r}"
+ 
+ 
++@pytest.mark.onlynoncluster
++async def test_asynckills():
++    from redis.asyncio.client import Redis
++
++    for b in [True, False]:
++        r = Redis(single_connection_client=b)
++
++        await r.set("foo", "foo")
++        await r.set("bar", "bar")
++
++        t = asyncio.create_task(r.get("foo"))
++        await asyncio.sleep(1)
++        t.cancel()
++        try:
++            await t
++        except asyncio.CancelledError:
++            pytest.fail("connection left open with unread response")
++
++        assert await r.get("bar") == b"bar"
++        assert await r.ping()
++        assert await r.get("foo") == b"foo"
++
++
+ @skip_if_server_version_lt("4.0.0")
+ @pytest.mark.redismod
+ @pytest.mark.onlynoncluster
