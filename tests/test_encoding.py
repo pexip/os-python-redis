@@ -1,7 +1,5 @@
 import pytest
-
 import redis
-from redis.connection import Connection
 
 from .conftest import _get_client
 
@@ -73,18 +71,6 @@ class TestEncodingErrors:
         )
         r.set("a", b"foo\xff")
         assert r.get("a") == "foo\ufffd"
-
-
-class TestMemoryviewsAreNotPacked:
-    def test_memoryviews_are_not_packed(self):
-        c = Connection()
-        arg = memoryview(b"some_arg")
-        arg_list = ["SOME_COMMAND", arg]
-        cmd = c.pack_command(*arg_list)
-        assert cmd[1] is arg
-        cmds = c.pack_commands([arg_list, arg_list])
-        assert cmds[1] is arg
-        assert cmds[3] is arg
 
 
 class TestCommandsAreNotEncoded:

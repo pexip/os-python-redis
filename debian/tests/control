@@ -1,6 +1,18 @@
 Tests: 0002-python3
-Restrictions: allow-stderr
-Depends: @, redis-server, python3-pytest, python3-setuptools, python3-mock, python3-all, python3-pytest-asyncio
+Restrictions: allow-stderr, isolation-container
+Depends:
+ @,
+ python3-all,
+ python3-coverage,
+ python3-numpy,
+ python3-pytest,
+ python3-pytest-asyncio (>= 0.24.0),
+ python3-pytest-timeout,
+ python3-setuptools,
+ redis-server,
 
 Tests: 0003-interaction
-Depends: @, redis-server
+Restrictions: isolation-container
+Depends:
+ @,
+ redis-server,

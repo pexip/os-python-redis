@@ -1,69 +1,87 @@
+# https://github.com/pyinvoke/invoke/issues/833
+import inspect
 import os
 import shutil
 
 from invoke import run, task
 
-with open("tox.ini") as fp:
-    lines = fp.read().split("\n")
-    dockers = [line.split("=")[1].strip() for line in lines if line.find("name") != -1]
+if not hasattr(inspect, "getargspec"):
+    inspect.getargspec = inspect.getfullargspec
 
 
 @task
-def devenv(c):
-    """Builds a development environment: downloads, and starts all dockers
-    specified in the tox.ini file.
-    """
+def devenv(c, endpoints="all"):
+    """Brings up the test environment, by wrapping docker compose."""
     clean(c)
-    cmd = "tox -e devenv"
-    for d in dockers:
-        cmd += f" --docker-dont-stop={d}"
+    cmd = f"docker compose --profile {endpoints} up -d --build"
     run(cmd)
 
 
 @task
 def build_docs(c):
     """Generates the sphinx documentation."""
-    run("tox -e docs")
+    run("pip install -r docs/requirements.txt")
+    run("make -C docs html")
 
 
 @task
 def linters(c):
     """Run code linters"""
-    run("tox -e linters")
+    run("flake8 tests redis")
+    run("black --target-version py37 --check --diff tests redis")
+    run("isort --check-only --diff tests redis")
+    run("vulture redis whitelist.py --min-confidence 80")
+    run("flynt --fail-on-change --dry-run tests redis")
 
 
 @task
 def all_tests(c):
-    """Run all linters, and tests in redis-py. This assumes you have all
-    the python versions specified in the tox.ini file.
-    """
+    """Run all linters, and tests in redis-py."""
     linters(c)
     tests(c)
 
 
 @task
-def tests(c):
-    """Run the redis-py test suite against the current python,
-    with and without hiredis.
-    """
+def tests(c, uvloop=False, protocol=2, profile=False):
+    """Run the redis-py test suite against the current python."""
     print("Starting Redis tests")
-    run("tox -e '{standalone,cluster}'-'{plain,hiredis}'")
+    standalone_tests(c, uvloop=uvloop, protocol=protocol, profile=profile)
+    cluster_tests(c, uvloop=uvloop, protocol=protocol, profile=profile)
 
 
 @task
-def standalone_tests(c):
-    """Run all Redis tests against the current python,
-    with and without hiredis."""
-    print("Starting Redis tests")
-    run("tox -e standalone-'{plain,hiredis,ocsp}'")
+def standalone_tests(
+    c, uvloop=False, protocol=2, profile=False, redis_mod_url=None, extra_markers=""
+):
+    """Run tests against a standalone redis instance"""
+    profile_arg = "--profile" if profile else ""
+    redis_mod_url = f"--redis-mod-url={redis_mod_url}" if redis_mod_url else ""
+    extra_markers = f" and {extra_markers}" if extra_markers else ""
+
+    if uvloop:
+        run(
+            f"pytest {profile_arg} --protocol={protocol} {redis_mod_url} --cov=./ --cov-report=xml:coverage_resp{protocol}_uvloop.xml -m 'not onlycluster and not graph{extra_markers}' --uvloop --junit-xml=standalone-resp{protocol}-uvloop-results.xml"
+        )
+    else:
+        run(
+            f"pytest {profile_arg} --protocol={protocol} {redis_mod_url} --cov=./ --cov-report=xml:coverage_resp{protocol}.xml -m 'not onlycluster and not graph{extra_markers}' --junit-xml=standalone-resp{protocol}-results.xml"
+        )
 
 
 @task
-def cluster_tests(c):
-    """Run all Redis Cluster tests against the current python,
-    with and without hiredis."""
-    print("Starting RedisCluster tests")
-    run("tox -e cluster-'{plain,hiredis}'")
+def cluster_tests(c, uvloop=False, protocol=2, profile=False):
+    """Run tests against a redis cluster"""
+    profile_arg = "--profile" if profile else ""
+    cluster_url = "redis://localhost:16379/0"
+    cluster_tls_url = "rediss://localhost:27379/0"
+    if uvloop:
+        run(
+            f"pytest {profile_arg} --protocol={protocol} --cov=./ --cov-report=xml:coverage_cluster_resp{protocol}_uvloop.xml -m 'not onlynoncluster and not redismod and not graph' --redis-url={cluster_url} --redis-ssl-url={cluster_tls_url} --junit-xml=cluster-resp{protocol}-uvloop-results.xml --uvloop"
+        )
+    else:
+        run(
+            f"pytest  {profile_arg} --protocol={protocol} --cov=./ --cov-report=xml:coverage_cluster_resp{protocol}.xml -m 'not onlynoncluster and not redismod and not graph' --redis-url={cluster_url} --redis-ssl-url={cluster_tls_url} --junit-xml=cluster-resp{protocol}-results.xml"
+        )
 
 
 @task
@@ -73,7 +91,7 @@ def clean(c):
         shutil.rmtree("build")
     if os.path.isdir("dist"):
         shutil.rmtree("dist")
-    run(f"docker rm -f {' '.join(dockers)}")
+    run("docker compose --profile all rm -s -f")
 
 
 @task

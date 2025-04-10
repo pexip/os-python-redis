@@ -1,20 +1,11 @@
 import asyncio
-import sys
 
 import pytest
-
-if sys.version_info[0:2] == (3, 6):
-    import pytest as pytest_asyncio
-else:
-    import pytest_asyncio
-
+import pytest_asyncio
 from redis.asyncio.lock import Lock
 from redis.exceptions import LockError, LockNotOwnedError
 
-pytestmark = pytest.mark.asyncio
 
-
-@pytest.mark.onlynoncluster
 class TestLock:
     @pytest_asyncio.fixture()
     async def r_decoded(self, create_redis):
@@ -105,16 +96,24 @@ class TestLock:
         assert 8 < (await r.pttl("foo")) <= 9500
         await lock.release()
 
-    async def test_blocking_timeout(self, r, event_loop):
+    async def test_blocking(self, r):
+        blocking = False
+        lock = self.get_lock(r, "foo", blocking=blocking)
+        assert not lock.blocking
+
+        lock_2 = self.get_lock(r, "foo")
+        assert lock_2.blocking
+
+    async def test_blocking_timeout(self, r):
         lock1 = self.get_lock(r, "foo")
         assert await lock1.acquire(blocking=False)
         bt = 0.2
         sleep = 0.05
         lock2 = self.get_lock(r, "foo", sleep=sleep, blocking_timeout=bt)
-        start = event_loop.time()
+        start = asyncio.get_running_loop().time()
         assert not await lock2.acquire()
         # The elapsed duration should be less than the total blocking_timeout
-        assert bt >= (event_loop.time() - start) > bt - sleep
+        assert bt >= (asyncio.get_running_loop().time() - start) > bt - sleep
         await lock1.release()
 
     async def test_context_manager(self, r):
@@ -136,11 +135,11 @@ class TestLock:
         sleep = 60
         bt = 1
         lock2 = self.get_lock(r, "foo", sleep=sleep, blocking_timeout=bt)
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         assert not await lock2.acquire()
         # the elapsed timed is less than the blocking_timeout as the lock is
         # unattainable given the sleep/blocking_timeout configuration
-        assert bt > (asyncio.get_event_loop().time() - start)
+        assert bt > (asyncio.get_running_loop().time() - start)
         await lock1.release()
 
     async def test_releasing_unlocked_lock_raises_error(self, r):
@@ -235,8 +234,7 @@ class TestLockClassSelection:
     def test_lock_class_argument(self, r):
         class MyLock:
             def __init__(self, *args, **kwargs):
-
                 pass
 
         lock = r.lock("foo", lock_class=MyLock)
-        assert type(lock) == MyLock
+        assert isinstance(lock, MyLock)

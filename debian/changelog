@@ -1,3 +1,24 @@
+python-redis (5.2.1-1) unstable; urgency=medium
+
+  * Team upload.
+  * Update upstream URLs.
+  * d/watch: Exclude pre-releases.
+  * New upstream release:
+    - CVE-2023-28858: Fix AsyncIO race condition (closes: #1033754).
+  * Adjust tests for redis-server < 7.2.
+  * Add the isolation-container restriction to autopkgtests, since they need
+    redis-server to be running.
+  * Use pybuild-plugin-pyproject.
+
+ -- Colin Watson <cjwatson@debian.org>  Thu, 10 Apr 2025 16:18:59 +0100
+
+python-redis (4.3.4-4) unstable; urgency=high
+
+  * Team upload.
+  * Patch to fix tests
+
+ -- Salvo 'LtWorf' Tomaselli <ltworf@debian.org>  Tue, 10 Dec 2024 15:35:43 +0100
+
 python-redis (4.3.4-3) unstable; urgency=medium
 
   * Skip a bunch of known-to-fail autopkgtests, especially ones that require
