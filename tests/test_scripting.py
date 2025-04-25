@@ -1,5 +1,4 @@
 import pytest
-
 import redis
 from redis import exceptions
 from redis.commands.core import Script
@@ -67,7 +66,6 @@ class TestScripting:
 
     @skip_if_server_version_lt("7.0.0")
     @skip_if_redis_enterprise()
-    @pytest.mark.onlynoncluster
     def test_eval_ro(self, r):
         r.set("a", "b")
         assert r.eval_ro("return redis.call('GET', KEYS[1])", 1, "a") == b"b"
@@ -157,7 +155,6 @@ class TestScripting:
 
     @skip_if_server_version_lt("7.0.0")
     @skip_if_redis_enterprise()
-    @pytest.mark.onlynoncluster
     def test_evalsha_ro(self, r):
         r.set("a", "b")
         get_sha = r.script_load("return redis.call('GET', KEYS[1])")

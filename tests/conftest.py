@@ -2,22 +2,31 @@ import argparse
 import random
 import time
 from typing import Callable, TypeVar
+from unittest import mock
 from unittest.mock import Mock
 from urllib.parse import urlparse
 
 import pytest
-from packaging.version import Version
-
 import redis
+from packaging.version import Version
+from redis import Sentinel
 from redis.backoff import NoBackoff
-from redis.connection import parse_url
+from redis.cache import (
+    CacheConfig,
+    CacheFactoryInterface,
+    CacheInterface,
+    CacheKey,
+    EvictionPolicy,
+)
+from redis.connection import Connection, ConnectionInterface, SSLConnection, parse_url
 from redis.exceptions import RedisClusterException
 from redis.retry import Retry
+from tests.ssl_utils import get_tls_certificates
 
 REDIS_INFO = {}
-default_redis_url = "redis://localhost:6379/9"
-default_redismod_url = "redis://localhost:36379"
-default_redis_unstable_url = "redis://localhost:6378"
+default_redis_url = "redis://localhost:6379/0"
+default_protocol = "2"
+default_redismod_url = "redis://localhost:6479"
 
 # default ssl client ignores verification for the purpose of testing
 default_redis_ssl_url = "rediss://localhost:6666"
@@ -40,7 +49,6 @@ class BooleanOptionalAction(argparse.Action):
         help=None,
         metavar=None,
     ):
-
         _option_strings = []
         for option_string in option_strings:
             _option_strings.append(option_string)
@@ -72,28 +80,47 @@ class BooleanOptionalAction(argparse.Action):
         return " | ".join(self.option_strings)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def enable_tracemalloc():
+    """
+    Enable tracemalloc while tests are being executed.
+    """
+    try:
+        import tracemalloc
+
+        tracemalloc.start()
+        yield
+        tracemalloc.stop()
+    except ImportError:
+        yield
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--redis-url",
         default=default_redis_url,
         action="store",
-        help="Redis connection string," " defaults to `%(default)s`",
+        help="Redis connection string, defaults to `%(default)s`",
     )
 
     parser.addoption(
-        "--redismod-url",
+        "--redis-mod-url",
         default=default_redismod_url,
         action="store",
-        help="Connection string to redis server"
-        " with loaded modules,"
-        " defaults to `%(default)s`",
+        help="Redis with modules connection string, defaults to `%(default)s`",
     )
 
+    parser.addoption(
+        "--protocol",
+        default=default_protocol,
+        action="store",
+        help="Protocol version, defaults to `%(default)s`",
+    )
     parser.addoption(
         "--redis-ssl-url",
         default=default_redis_ssl_url,
         action="store",
-        help="Redis SSL connection string," " defaults to `%(default)s`",
+        help="Redis SSL connection string, defaults to `%(default)s`",
     )
 
     parser.addoption(
@@ -106,14 +133,20 @@ def pytest_addoption(parser):
     )
 
     parser.addoption(
-        "--redis-unstable-url",
-        default=default_redis_unstable_url,
+        "--uvloop", action=BooleanOptionalAction, help="Run tests with uvloop"
+    )
+
+    parser.addoption(
+        "--sentinels",
         action="store",
-        help="Redis unstable (latest version) connection string "
-        "defaults to %(default)s`",
+        default="localhost:26379,localhost:26380,localhost:26381",
+        help="Comma-separated list of sentinel IPs and ports",
     )
     parser.addoption(
-        "--uvloop", action=BooleanOptionalAction, help="Run tests with uvloop"
+        "--master-service",
+        action="store",
+        default="redis-py-test",
+        help="Name of the Redis master service that the sentinels are monitoring",
     )
 
 
@@ -130,26 +163,39 @@ def _get_info(redis_url):
 
 
 def pytest_sessionstart(session):
+    # during test discovery, e.g. with VS Code, we may not
+    # have a server running.
+    protocol = session.config.getoption("--protocol")
+    REDIS_INFO["resp_version"] = int(protocol) if protocol else None
     redis_url = session.config.getoption("--redis-url")
-    info = _get_info(redis_url)
-    version = info["redis_version"]
-    arch_bits = info["arch_bits"]
-    cluster_enabled = info["cluster_enabled"]
+    try:
+        info = _get_info(redis_url)
+        version = info["redis_version"]
+        arch_bits = info["arch_bits"]
+        cluster_enabled = info["cluster_enabled"]
+        enterprise = info["enterprise"]
+    except redis.ConnectionError:
+        # provide optimistic defaults
+        info = {}
+        version = "10.0.0"
+        arch_bits = 64
+        cluster_enabled = False
+        enterprise = False
     REDIS_INFO["version"] = version
     REDIS_INFO["arch_bits"] = arch_bits
     REDIS_INFO["cluster_enabled"] = cluster_enabled
-    REDIS_INFO["enterprise"] = info["enterprise"]
+    REDIS_INFO["tls_cert_subdir"] = "cluster" if cluster_enabled else "standalone"
+    REDIS_INFO["enterprise"] = enterprise
     # store REDIS_INFO in config so that it is available from "condition strings"
     session.config.REDIS_INFO = REDIS_INFO
 
-    # module info, if the second redis is running
+    # module info
+    stack_url = session.config.getoption("--redis-mod-url")
+
     try:
-        redismod_url = session.config.getoption("--redismod-url")
-        info = _get_info(redismod_url)
-        REDIS_INFO["modules"] = info["modules"]
-    except redis.exceptions.ConnectionError:
-        pass
-    except KeyError:
+        stack_info = _get_info(stack_url)
+        REDIS_INFO["modules"] = stack_info["modules"]
+    except (KeyError, redis.exceptions.ConnectionError):
         pass
 
     if cluster_enabled:
@@ -230,7 +276,9 @@ def skip_ifmodversion_lt(min_version: str, module_name: str):
     for j in modules:
         if module_name == j.get("name"):
             version = j.get("ver")
-            mv = int(min_version.replace(".", ""))
+            mv = int(
+                "".join(["%02d" % int(segment) for segment in min_version.split(".")])
+            )
             check = version < mv
             return pytest.mark.skipif(check, reason="Redis module version")
 
@@ -265,6 +313,11 @@ def skip_if_cryptography() -> _TestDecorator:
         return pytest.mark.skipif(False, reason="No cryptography dependency")
 
 
+def skip_if_resp_version(resp_version) -> _TestDecorator:
+    check = REDIS_INFO.get("resp_version", None) == resp_version
+    return pytest.mark.skipif(check, reason=f"RESP version required != {resp_version}")
+
+
 def _get_client(
     cls, request, single_connection_client=True, flushdb=True, from_url=None, **kwargs
 ):
@@ -279,9 +332,25 @@ def _get_client(
         redis_url = request.config.getoption("--redis-url")
     else:
         redis_url = from_url
+
+    redis_tls_url = request.config.getoption("--redis-ssl-url")
+
+    if "protocol" not in redis_url and kwargs.get("protocol") is None:
+        kwargs["protocol"] = request.config.getoption("--protocol")
+
     cluster_mode = REDIS_INFO["cluster_enabled"]
+    ssl = kwargs.pop("ssl", False)
     if not cluster_mode:
         url_options = parse_url(redis_url)
+        connection_class = Connection
+        if ssl:
+            connection_class = SSLConnection
+            kwargs["ssl_certfile"], kwargs["ssl_keyfile"], kwargs["ssl_ca_certs"] = (
+                get_tls_certificates()
+            )
+            kwargs["ssl_cert_reqs"] = "required"
+            kwargs["port"] = urlparse(redis_tls_url).port
+        kwargs["connection_class"] = connection_class
         url_options.update(kwargs)
         pool = redis.ConnectionPool(**url_options)
         client = cls(connection_pool=pool)
@@ -322,20 +391,26 @@ def cluster_teardown(client, flushdb):
     client.disconnect_connection_pools()
 
 
-# specifically set to the zero database, because creating
-# an index on db != 0 raises a ResponseError in redis
 @pytest.fixture()
-def modclient(request, **kwargs):
-    rmurl = request.config.getoption("--redismod-url")
-    with _get_client(
-        redis.Redis, request, from_url=rmurl, decode_responses=True, **kwargs
-    ) as client:
+def r(request):
+    with _get_client(redis.Redis, request) as client:
         yield client
 
 
 @pytest.fixture()
-def r(request):
-    with _get_client(redis.Redis, request) as client:
+def stack_url(request):
+    return request.config.getoption("--redis-mod-url", default=default_redismod_url)
+
+
+@pytest.fixture()
+def stack_r(request, stack_url):
+    with _get_client(redis.Redis, request, from_url=stack_url) as client:
+        yield client
+
+
+@pytest.fixture()
+def decoded_r(request):
+    with _get_client(redis.Redis, request, decode_responses=True) as client:
         yield client
 
 
@@ -358,24 +433,59 @@ def sslclient(request):
         yield client
 
 
+@pytest.fixture()
+def sentinel_setup(request):
+    sentinel_ips = request.config.getoption("--sentinels")
+    sentinel_endpoints = [
+        (ip.strip(), int(port.strip()))
+        for ip, port in (endpoint.split(":") for endpoint in sentinel_ips.split(","))
+    ]
+    kwargs = request.param.get("kwargs", {}) if hasattr(request, "param") else {}
+    cache = request.param.get("cache", None)
+    cache_config = request.param.get("cache_config", None)
+    force_master_ip = request.param.get("force_master_ip", None)
+    decode_responses = request.param.get("decode_responses", False)
+    sentinel = Sentinel(
+        sentinel_endpoints,
+        force_master_ip=force_master_ip,
+        socket_timeout=0.1,
+        cache=cache,
+        cache_config=cache_config,
+        protocol=3,
+        decode_responses=decode_responses,
+        **kwargs,
+    )
+    yield sentinel
+    for s in sentinel.sentinels:
+        s.close()
+
+
+@pytest.fixture()
+def master(request, sentinel_setup):
+    master_service = request.config.getoption("--master-service")
+    master = sentinel_setup.master_for(master_service)
+    yield master
+    master.close()
+
+
 def _gen_cluster_mock_resp(r, response):
-    connection = Mock()
+    connection = Mock(spec=Connection)
     connection.retry = Retry(NoBackoff(), 0)
     connection.read_response.return_value = response
-    r.connection = connection
-    return r
+    with mock.patch.object(r, "connection", connection):
+        yield r
 
 
 @pytest.fixture()
 def mock_cluster_resp_ok(request, **kwargs):
     r = _get_client(redis.Redis, request, **kwargs)
-    return _gen_cluster_mock_resp(r, "OK")
+    yield from _gen_cluster_mock_resp(r, "OK")
 
 
 @pytest.fixture()
 def mock_cluster_resp_int(request, **kwargs):
     r = _get_client(redis.Redis, request, **kwargs)
-    return _gen_cluster_mock_resp(r, "2")
+    yield from _gen_cluster_mock_resp(r, 2)
 
 
 @pytest.fixture()
@@ -389,7 +499,7 @@ def mock_cluster_resp_info(request, **kwargs):
         "cluster_my_epoch:2\r\ncluster_stats_messages_sent:170262\r\n"
         "cluster_stats_messages_received:105653\r\n"
     )
-    return _gen_cluster_mock_resp(r, response)
+    yield from _gen_cluster_mock_resp(r, response)
 
 
 @pytest.fixture()
@@ -413,7 +523,7 @@ def mock_cluster_resp_nodes(request, **kwargs):
         "fbb23ed8cfa23f17eaf27ff7d0c410492a1093d6 172.17.0.7:7002 "
         "master,fail - 1447829446956 1447829444948 1 disconnected\n"
     )
-    return _gen_cluster_mock_resp(r, response)
+    yield from _gen_cluster_mock_resp(r, response)
 
 
 @pytest.fixture()
@@ -424,23 +534,45 @@ def mock_cluster_resp_slaves(request, **kwargs):
         "slave 19efe5a631f3296fdf21a5441680f893e8cc96ec 0 "
         "1447836789290 3 connected']"
     )
-    return _gen_cluster_mock_resp(r, response)
+    yield from _gen_cluster_mock_resp(r, response)
 
 
 @pytest.fixture(scope="session")
 def master_host(request):
     url = request.config.getoption("--redis-url")
     parts = urlparse(url)
-    yield parts.hostname, parts.port
+    return parts.hostname, (parts.port or 6379)
 
 
 @pytest.fixture()
-def unstable_r(request):
-    url = request.config.getoption("--redis-unstable-url")
-    with _get_client(
-        redis.Redis, request, from_url=url, decode_responses=True
-    ) as client:
-        yield client
+def cache_conf() -> CacheConfig:
+    return CacheConfig(max_size=100, eviction_policy=EvictionPolicy.LRU)
+
+
+@pytest.fixture()
+def mock_cache_factory() -> CacheFactoryInterface:
+    mock_factory = Mock(spec=CacheFactoryInterface)
+    return mock_factory
+
+
+@pytest.fixture()
+def mock_cache() -> CacheInterface:
+    mock_cache = Mock(spec=CacheInterface)
+    return mock_cache
+
+
+@pytest.fixture()
+def mock_connection() -> ConnectionInterface:
+    mock_connection = Mock(spec=ConnectionInterface)
+    return mock_connection
+
+
+@pytest.fixture()
+def cache_key(request) -> CacheKey:
+    command = request.param.get("command")
+    keys = request.param.get("redis_keys")
+
+    return CacheKey(command, keys)
 
 
 def wait_for_command(client, monitor, command, key=None):
@@ -462,3 +594,34 @@ def wait_for_command(client, monitor, command, key=None):
             return monitor_response
         if key in monitor_response["command"]:
             return None
+
+
+def is_resp2_connection(r):
+    if isinstance(r, redis.Redis) or isinstance(r, redis.asyncio.Redis):
+        protocol = r.connection_pool.connection_kwargs.get("protocol")
+    elif isinstance(r, redis.cluster.AbstractRedisCluster):
+        protocol = r.nodes_manager.connection_kwargs.get("protocol")
+    return protocol in ["2", 2, None]
+
+
+def get_protocol_version(r):
+    if isinstance(r, redis.Redis) or isinstance(r, redis.asyncio.Redis):
+        return r.connection_pool.connection_kwargs.get("protocol")
+    elif isinstance(r, redis.cluster.AbstractRedisCluster):
+        return r.nodes_manager.connection_kwargs.get("protocol")
+
+
+def assert_resp_response(r, response, resp2_expected, resp3_expected):
+    protocol = get_protocol_version(r)
+    if protocol in [2, "2", None]:
+        assert response == resp2_expected
+    else:
+        assert response == resp3_expected
+
+
+def assert_resp_response_in(r, response, resp2_expected, resp3_expected):
+    protocol = get_protocol_version(r)
+    if protocol in [2, "2", None]:
+        assert response in resp2_expected
+    else:
+        assert response in resp3_expected

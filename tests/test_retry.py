@@ -1,8 +1,7 @@
 from unittest.mock import patch
 
 import pytest
-
-from redis.backoff import NoBackoff
+from redis.backoff import AbstractBackoff, ExponentialBackoff, NoBackoff
 from redis.client import Redis
 from redis.connection import Connection, UnixDomainSocketConnection
 from redis.exceptions import (
@@ -16,7 +15,7 @@ from redis.retry import Retry
 from .conftest import _get_client
 
 
-class BackoffMock:
+class BackoffMock(AbstractBackoff):
     def __init__(self):
         self.reset_calls = 0
         self.calls = 0
@@ -203,3 +202,17 @@ class TestRedisClientRetry:
                     r.get("foo")
                 finally:
                     assert parse_response.call_count == retries + 1
+
+    def test_get_set_retry_object(self, request):
+        retry = Retry(NoBackoff(), 2)
+        r = _get_client(Redis, request, retry_on_timeout=True, retry=retry)
+        exist_conn = r.connection_pool.get_connection("_")
+        assert r.get_retry()._retries == retry._retries
+        assert isinstance(r.get_retry()._backoff, NoBackoff)
+        new_retry_policy = Retry(ExponentialBackoff(), 3)
+        r.set_retry(new_retry_policy)
+        assert r.get_retry()._retries == new_retry_policy._retries
+        assert isinstance(r.get_retry()._backoff, ExponentialBackoff)
+        assert exist_conn.retry._retries == new_retry_policy._retries
+        new_conn = r.connection_pool.get_connection("_")
+        assert new_conn.retry._retries == new_retry_policy._retries

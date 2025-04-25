@@ -3,7 +3,6 @@ redis.egg-info
 build/
 dist/
 dump.rdb
-/.tox
 _build
 vagrant/.vagrant
 .python-version
@@ -17,4 +16,10 @@ coverage.xml
 .venv*
 *.xml
 .coverage*
+prof
+profile_output*
 docker/stunnel/keys
+/dockers/*/node-*/*
+/dockers/*/tls/*
+/dockers/standalone/
+/dockers/cluster/
