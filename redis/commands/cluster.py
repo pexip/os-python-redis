@@ -7,13 +7,13 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Literal,
     Mapping,
     NoReturn,
     Optional,
     Union,
 )
 
-from redis.compat import Literal
 from redis.crc import key_slot
 from redis.exceptions import RedisClusterException, RedisError
 from redis.typing import (
@@ -23,6 +23,7 @@ from redis.typing import (
     KeysT,
     KeyT,
     PatternT,
+    ResponseT,
 )
 
 from .core import (
@@ -30,21 +31,23 @@ from .core import (
     AsyncACLCommands,
     AsyncDataAccessCommands,
     AsyncFunctionCommands,
+    AsyncGearsCommands,
     AsyncManagementCommands,
+    AsyncModuleCommands,
     AsyncScriptCommands,
     DataAccessCommands,
     FunctionCommands,
+    GearsCommands,
     ManagementCommands,
+    ModuleCommands,
     PubSubCommands,
-    ResponseT,
     ScriptCommands,
 )
 from .helpers import list_or_args
-from .redismodules import RedisModuleCommands
+from .redismodules import AsyncRedisModuleCommands, RedisModuleCommands
 
 if TYPE_CHECKING:
     from redis.asyncio.cluster import TargetNodesT
-
 
 # Not complete, but covers the major ones
 # https://redis.io/commands
@@ -52,6 +55,8 @@ READ_COMMANDS = frozenset(
     [
         "BITCOUNT",
         "BITPOS",
+        "EVAL_RO",
+        "EVALSHA_RO",
         "EXISTS",
         "GEODIST",
         "GEOHASH",
@@ -220,7 +225,7 @@ class ClusterMultiKeyCommands(ClusterCommandsProtocol):
         The keys are first split up into slots
         and then an DEL command is sent for every slot
 
-        Non-existant keys are ignored.
+        Non-existent keys are ignored.
         Returns the number of keys that were deleted.
 
         For more information see https://redis.io/commands/del
@@ -235,7 +240,7 @@ class ClusterMultiKeyCommands(ClusterCommandsProtocol):
         The keys are first split up into slots
         and then an TOUCH command is sent for every slot
 
-        Non-existant keys are ignored.
+        Non-existent keys are ignored.
         Returns the number of keys that were touched.
 
         For more information see https://redis.io/commands/touch
@@ -249,7 +254,7 @@ class ClusterMultiKeyCommands(ClusterCommandsProtocol):
         The keys are first split up into slots
         and then an TOUCH command is sent for every slot
 
-        Non-existant keys are ignored.
+        Non-existent keys are ignored.
         Returns the number of keys that were unlinked.
 
         For more information see https://redis.io/commands/unlink
@@ -315,6 +320,25 @@ class AsyncClusterMultiKeyCommands(ClusterMultiKeyCommands):
 
         # Sum up the reply from each command
         return sum(await self._execute_pipeline_by_slot(command, slots_to_keys))
+
+    async def _execute_pipeline_by_slot(
+        self, command: str, slots_to_args: Mapping[int, Iterable[EncodableT]]
+    ) -> List[Any]:
+        if self._initialize:
+            await self.initialize()
+        read_from_replicas = self.read_from_replicas and command in READ_COMMANDS
+        pipe = self.pipeline()
+        [
+            pipe.execute_command(
+                command,
+                *slot_args,
+                target_nodes=[
+                    self.nodes_manager.get_node_from_slot(slot, read_from_replicas)
+                ],
+            )
+            for slot, slot_args in slots_to_args.items()
+        ]
+        return await pipe.execute()
 
 
 class ClusterManagementCommands(ManagementCommands):
@@ -613,6 +637,14 @@ class ClusterManagementCommands(ManagementCommands):
         """
         return self.execute_command("CLUSTER SHARDS", target_nodes=target_nodes)
 
+    def cluster_myshardid(self, target_nodes=None):
+        """
+        Returns the shard ID of the node.
+
+        For more information see https://redis.io/commands/cluster-myshardid/
+        """
+        return self.execute_command("CLUSTER MYSHARDID", target_nodes=target_nodes)
+
     def cluster_links(self, target_node: "TargetNodesT") -> ResponseT:
         """
         Each node in a Redis Cluster maintains a pair of long-lived TCP link with each
@@ -624,6 +656,16 @@ class ClusterManagementCommands(ManagementCommands):
         For more information see https://redis.io/commands/cluster-links
         """
         return self.execute_command("CLUSTER LINKS", target_nodes=target_node)
+
+    def cluster_flushslots(self, target_nodes: Optional["TargetNodesT"] = None) -> None:
+        raise NotImplementedError(
+            "CLUSTER FLUSHSLOTS is intentionally not implemented in the client."
+        )
+
+    def cluster_bumpepoch(self, target_nodes: Optional["TargetNodesT"] = None) -> None:
+        raise NotImplementedError(
+            "CLUSTER BUMPEPOCH is intentionally not implemented in the client."
+        )
 
     def readonly(self, target_nodes: Optional["TargetNodesT"] = None) -> ResponseT:
         """
@@ -651,6 +693,12 @@ class ClusterManagementCommands(ManagementCommands):
         self.read_from_replicas = False
         return self.execute_command("READWRITE", target_nodes=target_nodes)
 
+    def gears_refresh_cluster(self, **kwargs) -> ResponseT:
+        """
+        On an OSS cluster, before executing any gears function, you must call this command. # noqa
+        """
+        return self.execute_command("REDISGEARS_2.REFRESHCLUSTER", **kwargs)
+
 
 class AsyncClusterManagementCommands(
     ClusterManagementCommands, AsyncManagementCommands
@@ -673,7 +721,7 @@ class AsyncClusterManagementCommands(
         """
         return await asyncio.gather(
             *(
-                asyncio.ensure_future(self.execute_command("CLUSTER DELSLOTS", slot))
+                asyncio.create_task(self.execute_command("CLUSTER DELSLOTS", slot))
                 for slot in slots
             )
         )
@@ -826,6 +874,8 @@ class RedisClusterCommands(
     ClusterDataAccessCommands,
     ScriptCommands,
     FunctionCommands,
+    GearsCommands,
+    ModuleCommands,
     RedisModuleCommands,
 ):
     """
@@ -855,6 +905,9 @@ class AsyncRedisClusterCommands(
     AsyncClusterDataAccessCommands,
     AsyncScriptCommands,
     AsyncFunctionCommands,
+    AsyncGearsCommands,
+    AsyncModuleCommands,
+    AsyncRedisModuleCommands,
 ):
     """
     A class for all Redis Cluster commands

@@ -1,2 +1,2 @@
 version=4
-https://github.com/andymccurdy/redis-py/tags (?:.*?/)?v?@ANY_VERSION@@ARCHIVE_EXT@
+https://github.com/redis/redis-py/tags (?:.*?/)?v?(\d[\.\d]*)@ARCHIVE_EXT@

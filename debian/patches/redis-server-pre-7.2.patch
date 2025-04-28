@@ -1,0 +1,140 @@
+From: Colin Watson <cjwatson@debian.org>
+Date: Thu, 10 Apr 2025 15:17:32 +0100
+Subject: Adjust tests for redis-server < 7.2
+
+Last-Update: 2025-04-10
+---
+ tests/test_asyncio/test_cluster.py  | 7 ++++++-
+ tests/test_asyncio/test_commands.py | 7 ++++++-
+ tests/test_cluster.py               | 7 ++++++-
+ tests/test_commands.py              | 7 ++++++-
+ 4 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/tests/test_asyncio/test_cluster.py b/tests/test_asyncio/test_cluster.py
+index 477397d..60ceb00 100644
+--- a/tests/test_asyncio/test_cluster.py
++++ b/tests/test_asyncio/test_cluster.py
+@@ -9,6 +9,7 @@ from urllib.parse import urlparse
+ import pytest
+ import pytest_asyncio
+ from _pytest.fixtures import FixtureRequest
++from packaging.version import Version
+ from redis._parsers import AsyncCommandsParser
+ from redis.asyncio.cluster import ClusterNode, NodesManager, RedisCluster
+ from redis.asyncio.connection import Connection, SSLConnection, async_timeout
+@@ -30,6 +31,7 @@ from redis.exceptions import (
+ )
+ from redis.utils import str_if_bytes
+ from tests.conftest import (
++    REDIS_INFO,
+     assert_resp_response,
+     is_resp2_connection,
+     skip_if_redis_enterprise,
+@@ -2337,7 +2339,10 @@ class TestClusterRedisCommands:
+             await user_client.hset("{cache}:0", "hkey", "hval")
+ 
+         assert isinstance(await r.acl_log(target_nodes=node), list)
+-        assert len(await r.acl_log(target_nodes=node)) == 3
++        if Version(REDIS_INFO.get("version", "0")) >= Version("7.2.0"):
++            assert len(await r.acl_log(target_nodes=node)) == 3
++        else:
++            assert len(await r.acl_log(target_nodes=node)) == 2
+         assert len(await r.acl_log(count=1, target_nodes=node)) == 1
+         assert isinstance((await r.acl_log(target_nodes=node))[0], dict)
+         assert "client-info" in (await r.acl_log(count=1, target_nodes=node))[0]
+diff --git a/tests/test_asyncio/test_commands.py b/tests/test_asyncio/test_commands.py
+index f6ed07f..e0819f3 100644
+--- a/tests/test_asyncio/test_commands.py
++++ b/tests/test_asyncio/test_commands.py
+@@ -12,6 +12,7 @@ from string import ascii_letters
+ import pytest
+ import pytest_asyncio
+ import redis
++from packaging.version import Version
+ from redis import exceptions
+ from redis._parsers.helpers import (
+     _RedisCallbacks,
+@@ -21,6 +22,7 @@ from redis._parsers.helpers import (
+ )
+ from redis.client import EMPTY_RESPONSE, NEVER_DECODE
+ from tests.conftest import (
++    REDIS_INFO,
+     assert_resp_response,
+     assert_resp_response_in,
+     is_resp2_connection,
+@@ -274,7 +276,10 @@ class TestRedisCommands:
+             await user_client.hset("cache:0", "hkey", "hval")
+ 
+         assert isinstance(await r.acl_log(), list)
+-        assert len(await r.acl_log()) == 3
++        if Version(REDIS_INFO.get("version", "0")) >= Version("7.2.0"):
++            assert len(await r.acl_log()) == 3
++        else:
++            assert len(await r.acl_log()) == 2
+         assert len(await r.acl_log(count=1)) == 1
+         assert isinstance((await r.acl_log())[0], dict)
+         expected = (await r.acl_log(count=1))[0]
+diff --git a/tests/test_cluster.py b/tests/test_cluster.py
+index 1b9b996..fc3c84b 100644
+--- a/tests/test_cluster.py
++++ b/tests/test_cluster.py
+@@ -11,6 +11,7 @@ from unittest.mock import DEFAULT, Mock, call, patch
+ 
+ import pytest
+ import redis
++from packaging.version import Version
+ from redis import Redis
+ from redis._parsers import CommandsParser
+ from redis.backoff import ExponentialBackoff, NoBackoff, default_backoff
+@@ -42,6 +43,7 @@ from redis.utils import str_if_bytes
+ from tests.test_pubsub import wait_for_message
+ 
+ from .conftest import (
++    REDIS_INFO,
+     _get_client,
+     assert_resp_response,
+     is_resp2_connection,
+@@ -2432,7 +2434,10 @@ class TestClusterRedisCommands:
+             user_client.hset("{cache}:0", "hkey", "hval")
+ 
+         assert isinstance(r.acl_log(target_nodes=node), list)
+-        assert len(r.acl_log(target_nodes=node)) == 3
++        if Version(REDIS_INFO.get("version", "0")) >= Version("7.2.0"):
++            assert len(r.acl_log(target_nodes=node)) == 3
++        else:
++            assert len(r.acl_log(target_nodes=node)) == 2
+         assert len(r.acl_log(count=1, target_nodes=node)) == 1
+         assert isinstance(r.acl_log(target_nodes=node)[0], dict)
+         assert "client-info" in r.acl_log(count=1, target_nodes=node)[0]
+diff --git a/tests/test_commands.py b/tests/test_commands.py
+index 4cad4c1..dc57883 100644
+--- a/tests/test_commands.py
++++ b/tests/test_commands.py
+@@ -10,6 +10,7 @@ from unittest.mock import patch
+ 
+ import pytest
+ import redis
++from packaging.version import Version
+ from redis import exceptions
+ from redis._parsers.helpers import (
+     _RedisCallbacks,
+@@ -20,6 +21,7 @@ from redis._parsers.helpers import (
+ from redis.client import EMPTY_RESPONSE, NEVER_DECODE
+ 
+ from .conftest import (
++    REDIS_INFO,
+     _get_client,
+     assert_resp_response,
+     assert_resp_response_in,
+@@ -397,7 +399,10 @@ class TestRedisCommands:
+             user_client.hset("cache:0", "hkey", "hval")
+ 
+         assert isinstance(r.acl_log(), list)
+-        assert len(r.acl_log()) == 3
++        if Version(REDIS_INFO.get("version", "0")) >= Version("7.2.0"):
++            assert len(r.acl_log()) == 3
++        else:
++            assert len(r.acl_log()) == 2
+         assert len(r.acl_log(count=1)) == 1
+         assert isinstance(r.acl_log()[0], dict)
+         expected = r.acl_log(count=1)[0]

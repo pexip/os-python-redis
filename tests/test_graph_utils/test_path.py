@@ -1,9 +1,8 @@
 import pytest
-
 from redis.commands.graph import edge, node, path
 
 
-@pytest.mark.redismod
+@pytest.mark.graph
 def test_init():
     with pytest.raises(TypeError):
         path.Path(None, None)
@@ -13,7 +12,7 @@ def test_init():
     assert isinstance(path.Path([], []), path.Path)
 
 
-@pytest.mark.redismod
+@pytest.mark.graph
 def test_new_empty_path():
     new_empty_path = path.Path.new_empty_path()
     assert isinstance(new_empty_path, path.Path)
@@ -21,7 +20,7 @@ def test_new_empty_path():
     assert new_empty_path._edges == []
 
 
-@pytest.mark.redismod
+@pytest.mark.graph
 def test_wrong_flows():
     node_1 = node.Node(node_id=1)
     node_2 = node.Node(node_id=2)
@@ -43,7 +42,7 @@ def test_wrong_flows():
         p.add_edge(edge_2)
 
 
-@pytest.mark.redismod
+@pytest.mark.graph
 def test_nodes_and_edges():
     node_1 = node.Node(node_id=1)
     node_2 = node.Node(node_id=2)
@@ -70,7 +69,7 @@ def test_nodes_and_edges():
     assert 2 == p.nodes_count()
 
 
-@pytest.mark.redismod
+@pytest.mark.graph
 def test_compare():
     node_1 = node.Node(node_id=1)
     node_2 = node.Node(node_id=2)
