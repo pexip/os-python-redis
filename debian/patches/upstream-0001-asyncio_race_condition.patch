@@ -10,11 +10,9 @@ Subject: [PATCH] AsyncIO Race Condition Fix (#2639)
  tests/test_asyncio/test_connection.py | 23 +++++++++++++++++++++++
  6 files changed, 64 insertions(+), 8 deletions(-)
 
-diff --git a/redis/asyncio/client.py b/redis/asyncio/client.py
-index 3d59016bb3..5c0b546bf5 100644
---- a/redis/asyncio/client.py
-+++ b/redis/asyncio/client.py
-@@ -1359,10 +1359,16 @@ async def execute(self, raise_on_error: bool = True):
+--- python-redis.orig/redis/asyncio/client.py
++++ python-redis/redis/asyncio/client.py
+@@ -1534,10 +1534,16 @@ class Pipeline(Redis):  # lgtm [py/init-
          conn = cast(Connection, conn)
  
          try:
@@ -34,11 +32,9 @@ index 3d59016bb3..5c0b546bf5 100644
          finally:
              await self.reset()
  
-diff --git a/redis/asyncio/cluster.py b/redis/asyncio/cluster.py
-index 3fe3ebc47e..8dfb1cbdb8 100644
---- a/redis/asyncio/cluster.py
-+++ b/redis/asyncio/cluster.py
-@@ -881,10 +881,18 @@ async def execute_command(self, *args: Any, **kwargs: Any) -> Any:
+--- python-redis.orig/redis/asyncio/cluster.py
++++ python-redis/redis/asyncio/cluster.py
+@@ -1051,10 +1051,18 @@ class ClusterNode:
          await connection.send_packed_command(connection.pack_command(*args), False)
  
          # Read response
@@ -58,12 +54,10 @@ index 3fe3ebc47e..8dfb1cbdb8 100644
 -            # Release connection
              self._free.append(connection)
  
-     async def execute_pipeline(self) -> bool:
-diff --git a/tests/test_asyncio/test_cluster.py b/tests/test_asyncio/test_cluster.py
-index d6e01f79dc..2e44cdde3e 100644
---- a/tests/test_asyncio/test_cluster.py
-+++ b/tests/test_asyncio/test_cluster.py
-@@ -333,6 +333,23 @@ async def test_execute_command_node_flag_random(self, r: RedisCluster) -> None:
+     async def execute_pipeline(self, commands: List["PipelineCommand"]) -> bool:
+--- python-redis.orig/tests/test_asyncio/test_cluster.py
++++ python-redis/tests/test_asyncio/test_cluster.py
+@@ -531,6 +531,23 @@ class TestRedisClusterObj:
                  called_count += 1
          assert called_count == 1
  
@@ -87,12 +81,10 @@ index d6e01f79dc..2e44cdde3e 100644
      async def test_execute_command_default_node(self, r: RedisCluster) -> None:
          """
          Test command execution without node flag is being executed on the
-diff --git a/tests/test_asyncio/test_connection.py b/tests/test_asyncio/test_connection.py
-index f6259adbd2..c414ee05cc 100644
---- a/tests/test_asyncio/test_connection.py
-+++ b/tests/test_asyncio/test_connection.py
-@@ -28,6 +28,29 @@ async def test_invalid_response(create_redis):
-     assert str(cm.value) == f"Protocol Error: {raw!r}"
+--- python-redis.orig/tests/test_asyncio/test_connection.py
++++ python-redis/tests/test_asyncio/test_connection.py
+@@ -94,6 +94,29 @@ async def test_single_connection():
+     await r.aclose()
  
  
 +@pytest.mark.onlynoncluster
