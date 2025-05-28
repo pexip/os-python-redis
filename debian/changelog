@@ -1,3 +1,27 @@
+python-redis (6.1.0-2) unstable; urgency=medium
+
+  * Use math.isclose() over testing for floating point equality. This should
+    fix broken autopkgtests on the arm64, ppc64el, riscv64 and s390x
+    architectures. (Closes: #1106376)
+
+ -- Chris Lamb <lamby@debian.org>  Wed, 28 May 2025 14:31:30 -0700
+
+python-redis (6.1.0-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Rework patches.
+  * Add new build requirement, python3-hatchling.
+  * Autopkgtests:
+    - Add python3-mock as a requirement to run the autopkgtests.
+    - Don't run the (failing) get_set_retry_object_for_cluster_client test
+      during autopkgtests.
+  * Update renamed Lintian tag to the new value,
+    debian-watch-does-not-check-openpgp-signature.
+  * Fix package long description to avoid Lintian warnings.
+  * Bump Standards-Verison to 4.7.2.
+
+ -- Chris Lamb <lamby@debian.org>  Wed, 14 May 2025 11:12:59 -0700
+
 python-redis (5.2.1-1) unstable; urgency=medium
 
   * Team upload.

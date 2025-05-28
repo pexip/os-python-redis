@@ -1,0 +1,44 @@
+From: Chris Lamb <lamby@debian.org>
+Date: Wed, 14 May 2025 10:34:02 -0700
+Subject: Inline import of AuthType Enum to avoid dependency on (unpackaged)
+ EntraId provider module
+
+---
+ tests/test_asyncio/test_credentials.py | 6 +++++-
+ tests/test_credentials.py              | 6 +++++-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/tests/test_asyncio/test_credentials.py b/tests/test_asyncio/test_credentials.py
+index b4824be..a6d55d7 100644
+--- a/tests/test_asyncio/test_credentials.py
++++ b/tests/test_asyncio/test_credentials.py
+@@ -18,7 +18,11 @@ from redis.credentials import CredentialProvider, UsernamePasswordCredentialProv
+ from redis.exceptions import ConnectionError
+ from redis.utils import str_if_bytes
+ from tests.conftest import get_endpoint, skip_if_redis_enterprise
+-from tests.entraid_utils import AuthType
++from enum import Enum
++class AuthType(Enum):
++    MANAGED_IDENTITY = "managed_identity"
++    SERVICE_PRINCIPAL = "service_principal"
++    DEFAULT_AZURE_CREDENTIAL = "default_azure_credential"
+ from tests.test_asyncio.conftest import get_credential_provider
+ 
+ try:
+diff --git a/tests/test_credentials.py b/tests/test_credentials.py
+index 58bbd01..e893338 100644
+--- a/tests/test_credentials.py
++++ b/tests/test_credentials.py
+@@ -22,7 +22,11 @@ from tests.conftest import (
+     get_endpoint,
+     skip_if_redis_enterprise,
+ )
+-from tests.entraid_utils import AuthType
++from enum import Enum
++class AuthType(Enum):
++    MANAGED_IDENTITY = "managed_identity"
++    SERVICE_PRINCIPAL = "service_principal"
++    DEFAULT_AZURE_CREDENTIAL = "default_azure_credential"
+ 
+ try:
+     from redis_entraid.cred_provider import EntraIdCredentialsProvider
