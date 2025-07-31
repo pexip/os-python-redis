@@ -4,6 +4,7 @@ Depends:
  @,
  python3-all,
  python3-coverage,
+ python3-mock,
  python3-numpy,
  python3-pytest,
  python3-pytest-asyncio (>= 0.24.0),

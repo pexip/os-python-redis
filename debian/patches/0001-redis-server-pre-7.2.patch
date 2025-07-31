@@ -11,7 +11,7 @@ Last-Update: 2025-04-10
  4 files changed, 24 insertions(+), 4 deletions(-)
 
 diff --git a/tests/test_asyncio/test_cluster.py b/tests/test_asyncio/test_cluster.py
-index 477397d..60ceb00 100644
+index 91e8b58..5a523bc 100644
 --- a/tests/test_asyncio/test_cluster.py
 +++ b/tests/test_asyncio/test_cluster.py
 @@ -9,6 +9,7 @@ from urllib.parse import urlparse
@@ -22,7 +22,7 @@ index 477397d..60ceb00 100644
  from redis._parsers import AsyncCommandsParser
  from redis.asyncio.cluster import ClusterNode, NodesManager, RedisCluster
  from redis.asyncio.connection import Connection, SSLConnection, async_timeout
-@@ -30,6 +31,7 @@ from redis.exceptions import (
+@@ -40,6 +41,7 @@ from redis.exceptions import (
  )
  from redis.utils import str_if_bytes
  from tests.conftest import (
@@ -30,7 +30,7 @@ index 477397d..60ceb00 100644
      assert_resp_response,
      is_resp2_connection,
      skip_if_redis_enterprise,
-@@ -2337,7 +2339,10 @@ class TestClusterRedisCommands:
+@@ -2414,7 +2416,10 @@ class TestClusterRedisCommands:
              await user_client.hset("{cache}:0", "hkey", "hval")
  
          assert isinstance(await r.acl_log(target_nodes=node), list)
@@ -43,7 +43,7 @@ index 477397d..60ceb00 100644
          assert isinstance((await r.acl_log(target_nodes=node))[0], dict)
          assert "client-info" in (await r.acl_log(count=1, target_nodes=node))[0]
 diff --git a/tests/test_asyncio/test_commands.py b/tests/test_asyncio/test_commands.py
-index f6ed07f..e0819f3 100644
+index bfb6855..6a9c68c 100644
 --- a/tests/test_asyncio/test_commands.py
 +++ b/tests/test_asyncio/test_commands.py
 @@ -12,6 +12,7 @@ from string import ascii_letters
@@ -54,15 +54,15 @@ index f6ed07f..e0819f3 100644
  from redis import exceptions
  from redis._parsers.helpers import (
      _RedisCallbacks,
-@@ -21,6 +22,7 @@ from redis._parsers.helpers import (
- )
- from redis.client import EMPTY_RESPONSE, NEVER_DECODE
+@@ -24,6 +25,7 @@ from redis.commands.json.path import Path
+ from redis.commands.search.field import TextField
+ from redis.commands.search.query import Query
  from tests.conftest import (
 +    REDIS_INFO,
      assert_resp_response,
      assert_resp_response_in,
      is_resp2_connection,
-@@ -274,7 +276,10 @@ class TestRedisCommands:
+@@ -331,7 +333,10 @@ class TestRedisCommands:
              await user_client.hset("cache:0", "hkey", "hval")
  
          assert isinstance(await r.acl_log(), list)
@@ -75,18 +75,18 @@ index f6ed07f..e0819f3 100644
          assert isinstance((await r.acl_log())[0], dict)
          expected = (await r.acl_log(count=1))[0]
 diff --git a/tests/test_cluster.py b/tests/test_cluster.py
-index 1b9b996..fc3c84b 100644
+index d360ab0..9a5e2c2 100644
 --- a/tests/test_cluster.py
 +++ b/tests/test_cluster.py
-@@ -11,6 +11,7 @@ from unittest.mock import DEFAULT, Mock, call, patch
+@@ -12,6 +12,7 @@ from unittest.mock import DEFAULT, Mock, call, patch
  
  import pytest
  import redis
 +from packaging.version import Version
  from redis import Redis
  from redis._parsers import CommandsParser
- from redis.backoff import ExponentialBackoff, NoBackoff, default_backoff
-@@ -42,6 +43,7 @@ from redis.utils import str_if_bytes
+ from redis.backoff import (
+@@ -48,6 +49,7 @@ from redis.utils import str_if_bytes
  from tests.test_pubsub import wait_for_message
  
  from .conftest import (
@@ -94,7 +94,7 @@ index 1b9b996..fc3c84b 100644
      _get_client,
      assert_resp_response,
      is_resp2_connection,
-@@ -2432,7 +2434,10 @@ class TestClusterRedisCommands:
+@@ -2512,7 +2514,10 @@ class TestClusterRedisCommands:
              user_client.hset("{cache}:0", "hkey", "hval")
  
          assert isinstance(r.acl_log(target_nodes=node), list)
@@ -107,7 +107,7 @@ index 1b9b996..fc3c84b 100644
          assert isinstance(r.acl_log(target_nodes=node)[0], dict)
          assert "client-info" in r.acl_log(count=1, target_nodes=node)[0]
 diff --git a/tests/test_commands.py b/tests/test_commands.py
-index 4cad4c1..dc57883 100644
+index 8758efa..ad9545f 100644
 --- a/tests/test_commands.py
 +++ b/tests/test_commands.py
 @@ -10,6 +10,7 @@ from unittest.mock import patch
@@ -118,15 +118,15 @@ index 4cad4c1..dc57883 100644
  from redis import exceptions
  from redis._parsers.helpers import (
      _RedisCallbacks,
-@@ -20,6 +21,7 @@ from redis._parsers.helpers import (
- from redis.client import EMPTY_RESPONSE, NEVER_DECODE
+@@ -24,6 +25,7 @@ from redis.commands.search.query import Query
+ from tests.test_utils import redis_server_time
  
  from .conftest import (
 +    REDIS_INFO,
      _get_client,
      assert_resp_response,
      assert_resp_response_in,
-@@ -397,7 +399,10 @@ class TestRedisCommands:
+@@ -448,7 +450,10 @@ class TestRedisCommands:
              user_client.hset("cache:0", "hkey", "hval")
  
          assert isinstance(r.acl_log(), list)

@@ -10,8 +10,9 @@ Build-Depends:
  dh-sequence-python3,
  pybuild-plugin-pyproject,
  python3-all,
+ python3-hatchling,
  python3-setuptools,
-Standards-Version: 4.6.1
+Standards-Version: 4.7.2
 Vcs-Git: https://salsa.debian.org/python-team/packages/python-redis.git
 Vcs-Browser: https://salsa.debian.org/python-team/packages/python-redis
 Homepage: https://github.com/redis/redis-py
@@ -25,7 +26,7 @@ Depends:
  ${python3:Depends},
 Suggests:
  python3-hiredis,
-Description: python bindings for Redis, a persistent key-value database with network interface
+Description: Python bindings for Redis, a persistent key-value database
  Redis is a key-value database in a similar vein to memcache but the dataset
  is non-volatile. Redis additionally provides native support for atomically
  manipulating and querying data structures such as lists and sets.
